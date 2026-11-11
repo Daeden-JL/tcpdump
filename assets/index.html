@@ -5,12 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tcpdump command builder</title>
 <meta name="description" content="Build, adjust and share tcpdump commands for PowerScale and Linux.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header class="top">
-  <h1 id="title">tcpdump.dev</h1>
-  <p id="tagline"></p>
+  <img src="icon.svg" alt="" width="44" height="44">
+  <div>
+    <h1 id="title">tcpdump.dev</h1>
+    <p id="tagline"></p>
+  </div>
 </header>
 <p id="config-error" class="banner" role="alert" hidden></p>
 <main>
@@ -42,7 +46,10 @@
   <p class="note">Load one into the builder and adjust it.</p>
   <div id="examples"></div>
 </section>
-<footer><p>Check interface names, paths and free disk space before running a capture.</p></footer>
+<footer>
+  <p>Check interface names, paths and free disk space before running a capture.</p>
+  <p id="links" hidden></p>
+</footer>
 <script src="app.js"></script>
 </body>
 </html>

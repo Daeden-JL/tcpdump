@@ -16,6 +16,17 @@ title = "tcpdump.dev"
 tagline = "Build, adjust and share tcpdump commands for PowerScale and Linux."
 listen = "127.0.0.1:8080"
 
+# Footer links. Set `enabled = false` to hide one.
+[site.repo]
+enabled = true
+url = "https://github.com/Daeden-JL/tcpdump"
+label = "Source on GitHub"
+
+[site.license]
+enabled = true
+url = "https://github.com/Daeden-JL/tcpdump/blob/main/LICENSE"
+label = "MIT License"
+
 # ---------------------------------------------------------------------------
 # Targets: the systems a command can be generated for.
 #

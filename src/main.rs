@@ -181,6 +181,8 @@ async fn main() {
         .route("/", get(|| async { asset("text/html; charset=utf-8", include_str!("../assets/index.html")) }))
         .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("../assets/app.js")) }))
         .route("/style.css", get(|| async { asset("text/css; charset=utf-8", include_str!("../assets/style.css")) }))
+        .route("/icon.svg", get(|| async { asset("image/svg+xml", include_str!("../assets/icon.svg")) }))
+        .route("/favicon.ico", get(|| async { asset("image/svg+xml", include_str!("../assets/icon.svg")) }))
         .route("/api/config", get(api_config))
         .route("/api/build", get(api_build))
         .route("/api/events", get(api_events))

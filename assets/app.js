@@ -284,6 +284,11 @@ async function loadConfig() {
   const banner = $("#config-error");
   banner.hidden = !config.error;
   banner.textContent = config.error ? `The configuration file has an error, so the last working version is shown. ${config.error}` : "";
+  const links = [[config.site.repo, "Source code"], [config.site.license, "License"]]
+    .filter(([l]) => l && l.enabled && l.url)
+    .map(([l, fallback]) => el("a", { href: l.url, rel: "noopener", text: l.label || fallback }));
+  $("#links").hidden = !links.length;
+  $("#links").replaceChildren(...links);
   renderExamples();
 }
 
