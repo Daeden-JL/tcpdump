@@ -12,7 +12,7 @@ use notify::{RecursiveMode, Watcher};
 use serde_json::json;
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::WatchStream;
@@ -123,17 +123,46 @@ fn no_cache(body: impl IntoResponse) -> impl IntoResponse {
     ([(CACHE_CONTROL, "no-store")], body)
 }
 
-fn asset(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+const INDEX_HTML: &str = include_str!("../assets/index.html");
+const APP_JS: &str = include_str!("../assets/app.js");
+const STYLE_CSS: &str = include_str!("../assets/style.css");
+const ICON_SVG: &str = include_str!("../assets/icon.svg");
+
+/// Fingerprint of the embedded assets (FNV-1a). It is part of their URL, so
+/// a new build is never paired with a stylesheet or script that a browser or
+/// CDN cached from an older one.
+fn asset_version() -> &'static str {
+    static VERSION: LazyLock<String> = LazyLock::new(|| {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for byte in [APP_JS, STYLE_CSS, ICON_SVG].iter().flat_map(|s| s.bytes()) {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
+        format!("{hash:016x}")
+    });
+    &VERSION
+}
+
+/// The page, with `{{v}}` in asset URLs replaced by the fingerprint.
+fn index_html() -> &'static str {
+    static PAGE: LazyLock<String> = LazyLock::new(|| INDEX_HTML.replace("{{v}}", asset_version()));
+    &PAGE
+}
+
+fn asset(content_type: &'static str, cache: &'static str, body: &'static str) -> impl IntoResponse {
     (
         [
             (CONTENT_TYPE, content_type),
-            (CACHE_CONTROL, "no-cache"),
+            (CACHE_CONTROL, cache),
             (X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (CONTENT_SECURITY_POLICY, "default-src 'self'; frame-ancestors 'none'"),
         ],
         body,
     )
 }
+
+/// The page itself must always be fetched fresh; fingerprinted assets never change.
+const FRESH: &str = "no-store";
+const FOREVER: &str = "public, max-age=31536000, immutable";
 
 async fn shutdown_signal() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
@@ -178,11 +207,15 @@ async fn main() {
     }
 
     let router = Router::new()
-        .route("/", get(|| async { asset("text/html; charset=utf-8", include_str!("../assets/index.html")) }))
-        .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", include_str!("../assets/app.js")) }))
-        .route("/style.css", get(|| async { asset("text/css; charset=utf-8", include_str!("../assets/style.css")) }))
-        .route("/icon.svg", get(|| async { asset("image/svg+xml", include_str!("../assets/icon.svg")) }))
-        .route("/favicon.ico", get(|| async { asset("image/svg+xml", include_str!("../assets/icon.svg")) }))
+        .route("/", get(|| async { asset("text/html; charset=utf-8", FRESH, index_html()) }))
+        .route("/static/{v}/app.js", get(|| async { asset("text/javascript; charset=utf-8", FOREVER, APP_JS) }))
+        .route("/static/{v}/style.css", get(|| async { asset("text/css; charset=utf-8", FOREVER, STYLE_CSS) }))
+        .route("/static/{v}/icon.svg", get(|| async { asset("image/svg+xml", FOREVER, ICON_SVG) }))
+        // Un-fingerprinted addresses used by earlier builds; kept so an old cached page still works.
+        .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", FRESH, APP_JS) }))
+        .route("/style.css", get(|| async { asset("text/css; charset=utf-8", FRESH, STYLE_CSS) }))
+        .route("/icon.svg", get(|| async { asset("image/svg+xml", FRESH, ICON_SVG) }))
+        .route("/favicon.ico", get(|| async { asset("image/svg+xml", FRESH, ICON_SVG) }))
         .route("/api/config", get(api_config))
         .route("/api/build", get(api_build))
         .route("/api/events", get(api_events))
@@ -200,5 +233,21 @@ async fn main() {
     tokio::select! {
         r = axum::serve(listener, router) => { if let Err(e) = r { eprintln!("server error: {e}"); } }
         _ = shutdown_signal() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_references_fingerprinted_assets_only() {
+        let page = index_html();
+        let v = asset_version();
+        assert_eq!(v.len(), 16);
+        assert!(!page.contains("{{v}}"));
+        for file in ["style.css", "app.js", "icon.svg"] {
+            assert!(page.contains(&format!("static/{v}/{file}")), "{file} is not fingerprinted");
+        }
     }
 }
