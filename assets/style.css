@@ -43,7 +43,8 @@ body {
   margin: 0 auto;
   padding: 0 16px;
 }
-.top { padding-top: 28px; padding-bottom: 12px; }
+.top { padding-top: 28px; padding-bottom: 12px; display: flex; align-items: center; gap: 14px; }
+.top img { flex: none; border-radius: 10px; }
 h1 { margin: 0; font: 700 1.7rem/1.2 var(--mono); letter-spacing: -0.02em; }
 h2 { margin: 0; font-size: 1.05rem; }
 h3 { margin: 0; font-size: 0.95rem; }
@@ -178,4 +179,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .example { margin: 0; }
 .example pre { margin: 8px 0 0; font-size: 0.78rem; }
 footer { padding-top: 16px; padding-bottom: 32px; color: var(--muted); font-size: 0.85rem; }
+footer p { margin: 0 0 6px; }
+#links { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+a { color: var(--accent); }
 [hidden] { display: none !important; }

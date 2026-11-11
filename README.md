@@ -43,7 +43,7 @@ under a path prefix as long as the proxy strips the prefix.
 
 | Section | Purpose |
 | --- | --- |
-| `[site]` | `url` is the public address used for share links. Change it to host the app anywhere; leave it empty to use the address the visitor is on. |
+| `[site]` | `url` is the public address used for share links. Change it to host the app anywhere; leave it empty to use the address the visitor is on. `[site.repo]` and `[site.license]` are footer links; set `enabled = false` to hide one. |
 | `[[targets]]` | A system: tcpdump command, output folder, file and log name templates, interface defaults, and the optional `[targets.cluster]` wrappers. |
 | `[[flags]]` | A tcpdump option: type, default, limits, `dependencies`, `exclusions`, a one-line `description`, a longer `explanation`, and `[[flags.recommendations]]`. |
 | `[filter]` | Protocol list and one-click filter snippets. |

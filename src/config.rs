@@ -32,6 +32,24 @@ pub struct Site {
     /// Address the server binds to. Read at startup only.
     #[serde(default)]
     pub listen: String,
+    /// Footer link to the source repository.
+    #[serde(default)]
+    pub repo: Link,
+    /// Footer link to the license.
+    #[serde(default)]
+    pub license: Link,
+}
+
+/// An optional footer link; shown only when `enabled` and `url` is set.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -261,6 +279,12 @@ impl Config {
         if self.targets.is_empty() {
             return Err("at least one [[targets]] entry is required".into());
         }
+        for (name, link) in [("site.repo", &self.site.repo), ("site.license", &self.site.license)] {
+            let web = link.url.starts_with("https://") || link.url.starts_with("http://");
+            if link.enabled && !web {
+                return Err(format!("{name}.url must start with https:// or http:// while the link is enabled"));
+            }
+        }
         let mut ids = HashSet::new();
         for t in &self.targets {
             if t.id.is_empty() || !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -306,5 +330,31 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHIPPED: &str = include_str!("../tcpdump.toml");
+
+    #[test]
+    fn footer_links_can_be_switched_off_or_omitted() {
+        let cfg = Config::parse(SHIPPED).unwrap();
+        assert!(cfg.site.repo.enabled && cfg.site.license.enabled);
+
+        let off = SHIPPED.replacen("enabled = true\nurl = \"https://github.com/Daeden-JL/tcpdump\"", "enabled = false\nurl = \"\"", 1);
+        let cfg = Config::parse(&off).unwrap();
+        assert!(!cfg.site.repo.enabled && cfg.site.license.enabled);
+
+        let minimal = "version = \"1\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
+        assert!(!Config::parse(minimal).unwrap().site.repo.enabled);
+    }
+
+    #[test]
+    fn enabled_footer_links_need_a_web_address() {
+        let bad = SHIPPED.replacen("url = \"https://github.com/Daeden-JL/tcpdump\"", "url = \"javascript:alert(1)\"", 1);
+        assert!(Config::parse(&bad).unwrap_err().contains("site.repo.url"));
     }
 }
