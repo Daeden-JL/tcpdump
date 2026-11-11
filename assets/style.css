@@ -38,12 +38,12 @@ body {
   color: var(--ink);
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-.top, main, #examples-section, footer, .banner {
+main, #examples-section, footer, .banner {
   max-width: 1240px;
   margin: 0 auto;
   padding: 0 16px;
 }
-.top { padding-top: 28px; padding-bottom: 12px; display: flex; align-items: center; gap: 14px; }
+.top { grid-column: 1; padding-bottom: 14px; display: flex; align-items: center; gap: 14px; min-width: 0; }
 .top img { flex: none; border-radius: 10px; }
 h1 { margin: 0; font: 700 1.7rem/1.2 var(--mono); letter-spacing: -0.02em; }
 h2 { margin: 0; font-size: 1.05rem; }
@@ -63,13 +63,16 @@ h3 { margin: 0; font-size: 0.95rem; }
 main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 20px;
+  gap: 0 20px;
   align-items: start;
+  padding-top: 28px;
 }
-#result { position: sticky; top: 12px; }
+#form { grid-column: 1; }
+#result { grid-column: 2; grid-row: 1 / span 2; position: sticky; top: 12px; }
 @media (max-width: 860px) {
   main { grid-template-columns: minmax(0, 1fr); }
-  #result { position: static; order: -1; }
+  .top { order: -2; }
+  #result { grid-column: 1; grid-row: auto; position: static; order: -1; }
 }
 
 fieldset, #result, .example {
