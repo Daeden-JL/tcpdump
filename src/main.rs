@@ -105,6 +105,7 @@ async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
         "targets": cfg.targets,
         "flags": cfg.flags,
         "filter": cfg.filter,
+        "estimate": cfg.estimate,
         "examples": examples,
     })))
 }
@@ -126,13 +127,14 @@ async fn api_fix(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> impl
 /// page currently has selected, used only to break ties.
 async fn api_parse(State(app): State<Arc<App>>, RawQuery(query): RawQuery, body: String) -> impl IntoResponse {
     let cfg = app.config();
-    let hint = builder::parse_query(query.as_deref().unwrap_or(""))
-        .into_iter()
-        .find(|(k, _)| k == "t")
-        .map(|(_, v)| v)
-        .unwrap_or_default();
+    let given = builder::parse_query(query.as_deref().unwrap_or(""));
+    let hint = given.iter().find(|(k, _)| k == "t").map(|(_, v)| v.clone()).unwrap_or_default();
     no_cache(Json(match parse::parse(&cfg, &body, &hint) {
-        Some(parsed) => json!({ "found": true, "notes": parsed.notes, "output": builder::build(&cfg, &parsed.pairs) }),
+        Some(mut parsed) => {
+            // The estimate inputs are not part of a command, so carry them over.
+            parsed.pairs.extend(given.into_iter().filter(|(k, _)| ["en", "ei", "ls", "fs"].contains(&k.as_str())));
+            json!({ "found": true, "notes": parsed.notes, "output": builder::build(&cfg, &parsed.pairs) })
+        }
         None => json!({ "found": false }),
     }))
 }

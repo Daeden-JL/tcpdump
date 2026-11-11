@@ -12,6 +12,8 @@ pub struct Config {
     pub site: Site,
     #[serde(default)]
     pub theme: Theme,
+    #[serde(default)]
+    pub estimate: EstimateConfig,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub flags: Vec<Flag>,
@@ -19,6 +21,41 @@ pub struct Config {
     pub filter: FilterConfig,
     #[serde(default)]
     pub examples: Vec<Example>,
+}
+
+/// Inputs for the capture size estimate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EstimateConfig {
+    /// Link speeds offered for the worst-case estimate of timed captures.
+    #[serde(default = "d_link_speeds")]
+    pub link_speeds_gbit: Vec<u64>,
+    #[serde(default = "d_link_speed")]
+    pub default_link_speed_gbit: u64,
+}
+
+impl Default for EstimateConfig {
+    fn default() -> Self {
+        EstimateConfig { link_speeds_gbit: d_link_speeds(), default_link_speed_gbit: d_link_speed() }
+    }
+}
+
+fn d_link_speeds() -> Vec<u64> {
+    vec![1, 10, 25, 40, 100]
+}
+fn d_link_speed() -> u64 {
+    10
+}
+
+/// What a flag means for the size estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    SnapLength,
+    FileSizeMb,
+    FileCount,
+    RotateSeconds,
+    PacketCount,
 }
 
 /// Colours. `light` and `dark` override individual entries of [`PALETTE`].
@@ -235,6 +272,9 @@ pub struct Flag {
     pub targets: Vec<String>,
     #[serde(default)]
     pub choices: Vec<String>,
+    /// Tells the size estimate what this flag controls.
+    #[serde(default)]
+    pub role: Option<Role>,
     /// Common values and why you would pick them.
     #[serde(default)]
     pub recommendations: Vec<Recommendation>,
@@ -371,6 +411,22 @@ impl Config {
             }
         }
         self.theme.validate()?;
+        if !self.estimate.link_speeds_gbit.contains(&self.estimate.default_link_speed_gbit) {
+            return Err("estimate.default_link_speed_gbit must be one of estimate.link_speeds_gbit".into());
+        }
+        if self.estimate.link_speeds_gbit.iter().any(|s| *s == 0 || *s > 1000) {
+            return Err("estimate.link_speeds_gbit entries must be between 1 and 1000".into());
+        }
+        let mut roles = Vec::new();
+        for f in self.flags.iter().filter(|f| f.role.is_some()) {
+            if f.value_type != ValueType::Integer {
+                return Err(format!("flag {} has a role, so its value_type must be Integer", f.name));
+            }
+            if roles.contains(&f.role) {
+                return Err(format!("flag {} repeats a role another flag already has", f.name));
+            }
+            roles.push(f.role);
+        }
         let mut ids = HashSet::new();
         for t in &self.targets {
             if t.id.is_empty() || !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {

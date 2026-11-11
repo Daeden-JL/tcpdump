@@ -54,6 +54,29 @@
       <pre id="stop-command" tabindex="0"></pre>
     </div>
     <p id="stop-note" class="note" hidden>The capture runs in the foreground. Press Ctrl-C to stop it.</p>
+    <section id="estimate" aria-labelledby="estimate-title" hidden>
+      <h3 id="estimate-title">Capture size estimate</h3>
+      <p id="est-headline"></p>
+      <ul id="est-lines"></ul>
+      <div id="est-inputs">
+        <label class="field" for="est_nodes" id="est_nodes-field" hidden>
+          <span>Number of nodes in the cluster</span>
+          <input id="est_nodes" type="number" min="1" inputmode="numeric" placeholder="e.g. 4">
+        </label>
+        <label class="field" for="est_ifaces" id="est_ifaces-field" hidden>
+          <span>Interfaces captured on each node</span>
+          <input id="est_ifaces" type="number" min="1" inputmode="numeric" placeholder="e.g. 2">
+        </label>
+        <label class="field" for="link_speed" id="link_speed-field" hidden>
+          <span>Link speed of each interface</span>
+          <select id="link_speed"></select>
+        </label>
+        <label class="field" for="free_space" id="free_space-field">
+          <span>Free space on the capture drive, in GB (optional)</span>
+          <input id="free_space" type="number" min="0" inputmode="decimal" placeholder="e.g. 500">
+        </label>
+      </div>
+    </section>
     <div class="actions">
       <button type="button" id="copy-link">Copy link to this setup</button>
       <button type="button" id="reset">Reset</button>

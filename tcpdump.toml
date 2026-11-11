@@ -71,6 +71,16 @@ error = "#ff8f8f"
 warn = "#f0c060"
 
 # ---------------------------------------------------------------------------
+# Capture size estimate. Size-rotated captures have an exact limit. Timed
+# captures depend on traffic, so the estimate assumes a link of the chosen
+# speed completely full in both directions.
+# ---------------------------------------------------------------------------
+
+[estimate]
+link_speeds_gbit = [1, 10, 25, 40, 100]
+default_link_speed_gbit = 10
+
+# ---------------------------------------------------------------------------
 # Targets: the systems a command can be generated for.
 #
 # Templates may use these placeholders:
@@ -130,11 +140,14 @@ any_interface = "any"
 #                   for a value above max (default: max itself)
 #   dependencies    needs at least one of these flags to be on
 #   exclusions      cannot be combined with these flags
+#   role            what the flag means to the size estimate: snap_length,
+#                   file_size_mb, file_count, rotate_seconds or packet_count
 #   targets         limit the flag to some target ids (default: all)
 # ---------------------------------------------------------------------------
 
 [[flags]]
 name = "-s"
+role = "snap_length"
 label = "Snap length"
 description = "Bytes captured from each packet. 0 means the whole packet."
 explanation = """
@@ -175,6 +188,7 @@ reason = "Nothing is cut off, including jumbo frames. Largest files; use when th
 
 [[flags]]
 name = "-C"
+role = "file_size_mb"
 label = "Rotate by size"
 description = "Start a new file each time the current one reaches this many megabytes."
 explanation = """
@@ -198,6 +212,7 @@ reason = "Fewer files to manage on fast links; still workable in Wireshark."
 
 [[flags]]
 name = "-G"
+role = "rotate_seconds"
 label = "Rotate by time"
 description = "Start a new file every N seconds."
 explanation = """
@@ -222,6 +237,7 @@ reason = "A sensible piece size for captures that run for hours."
 
 [[flags]]
 name = "-W"
+role = "file_count"
 label = "File count"
 description = "Number of files to keep (with -C) or to write before stopping (with -G)."
 explanation = """
@@ -245,6 +261,7 @@ reason = "With -C 1024: a 10 GB ring per interface, enough to catch most intermi
 
 [[flags]]
 name = "-c"
+role = "packet_count"
 label = "Packet count"
 description = "Stop after capturing this many packets."
 value_type = "Integer"

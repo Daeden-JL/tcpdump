@@ -5,7 +5,7 @@
 //! value is therefore checked against a conservative character set, and no
 //! command is produced at all while any error is outstanding.
 
-use crate::config::{Config, Flag, Target, ValueType};
+use crate::config::{Config, Flag, Role, Target, ValueType};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
@@ -36,6 +36,24 @@ pub struct State {
     pub nets: Vec<String>,
     pub proto: String,
     pub raw: String,
+    /// Estimate inputs: counts the command cannot tell us, link speed in
+    /// Gbit/s, and free space in GB. They never change the command.
+    pub est_nodes: String,
+    pub est_ifaces: String,
+    pub link_speed: String,
+    pub free_space: String,
+}
+
+/// The capture size estimate, already worded for display.
+#[derive(Debug, Serialize)]
+pub struct Estimate {
+    /// "none" (nothing written), "exact", "worst" or "unbounded".
+    pub kind: &'static str,
+    pub headline: String,
+    pub lines: Vec<String>,
+    pub need_nodes: bool,
+    pub need_ifaces: bool,
+    pub need_link: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +61,7 @@ pub struct Output {
     pub command: String,
     pub stop_command: Option<String>,
     pub issues: Vec<Issue>,
+    pub estimate: Option<Estimate>,
     pub state: State,
 }
 
@@ -401,6 +420,20 @@ pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
         changes.push(format!("Protocol {:?} removed.", st.proto));
         st.proto.clear();
     }
+    for (value, what) in [(&mut st.est_nodes, "Number of nodes"), (&mut st.est_ifaces, "Number of interfaces")] {
+        if !value.is_empty() && !valid_count(value) {
+            changes.push(format!("{what} for the estimate ({value:?}) cleared."));
+            value.clear();
+        }
+    }
+    if !cfg.estimate.link_speeds_gbit.iter().any(|s| s.to_string() == st.link_speed) {
+        st.link_speed = cfg.estimate.default_link_speed_gbit.to_string();
+        changes.push(format!("Link speed for the estimate set to {} Gbit/s.", st.link_speed));
+    }
+    if !st.free_space.is_empty() && !valid_free_space(&st.free_space) {
+        changes.push(format!("Free space for the estimate ({:?}) cleared.", st.free_space));
+        st.free_space.clear();
+    }
     let mut probe = Ctx { issues: Vec::new() };
     check_raw_filter(st.raw.trim(), &mut probe);
     if !probe.issues.is_empty() {
@@ -461,7 +494,195 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
         nets: split_list(get("net")),
         proto: get("pr").to_string(),
         raw: get("q").to_string(),
+        est_nodes: get("en").trim().to_string(),
+        est_ifaces: get("ei").trim().to_string(),
+        link_speed: match get("ls").trim() {
+            "" => cfg.estimate.default_link_speed_gbit.to_string(),
+            given => given.to_string(),
+        },
+        free_space: get("fs").trim().to_string(),
     }
+}
+
+fn human_size(bytes: u128) -> String {
+    const UNITS: [(&str, f64); 4] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("KB", 1e3)];
+    let b = bytes as f64;
+    let (unit, size) = UNITS.iter().find(|u| b >= u.1).unwrap_or(&UNITS[3]);
+    let n = b / size;
+    if n >= 100.0 { format!("{n:.0} {unit}") } else { format!("{n:.1} {unit}") }
+}
+
+fn human_duration(seconds: u128) -> String {
+    let part = |n: u128, unit: &str| format!("{n} {unit}{}", if n == 1 { "" } else { "s" });
+    let (d, h, m, s) = (seconds / 86400, seconds % 86400 / 3600, seconds % 3600 / 60, seconds % 60);
+    let parts: Vec<String> = [(d, "day"), (h, "hour"), (m, "minute"), (s, "second")]
+        .into_iter()
+        .filter(|p| p.0 > 0)
+        .map(|p| part(p.0, p.1))
+        .collect();
+    if parts.is_empty() { "0 seconds".into() } else { parts.join(" ") }
+}
+
+fn plural(n: u128, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// How many nodes "1,2,5-8" names.
+fn count_nodes(list: &str) -> u128 {
+    list.split(',')
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.split_once('-').map(|(a, b)| (a.parse::<u128>(), b.parse::<u128>())) {
+            Some((Ok(a), Ok(b))) if b >= a => b - a + 1,
+            _ => 1,
+        })
+        .sum()
+}
+
+const MAX_COUNT: u128 = 100_000;
+
+fn valid_count(s: &str) -> bool {
+    s.parse::<u128>().is_ok_and(|n| (1..=MAX_COUNT).contains(&n))
+}
+
+fn valid_free_space(s: &str) -> bool {
+    s.parse::<f64>().is_ok_and(|n| n.is_finite() && (0.0..=1e9).contains(&n)) && all_chars(s, ".")
+}
+
+fn check_estimate_inputs(cfg: &Config, st: &State, cx: &mut Ctx) {
+    for (field, value, what) in [("est_nodes", &st.est_nodes, "number of nodes"), ("est_ifaces", &st.est_ifaces, "number of interfaces")] {
+        if !value.is_empty() && !valid_count(value) {
+            cx.error(field, format!("The {what} must be a whole number of 1 or more."));
+        }
+    }
+    if !cfg.estimate.link_speeds_gbit.iter().any(|s| s.to_string() == st.link_speed) {
+        cx.error("link_speed", "Pick one of the listed link speeds.");
+    }
+    if !st.free_space.is_empty() && !valid_free_space(&st.free_space) {
+        cx.error("free_space", "Free space must be a number of gigabytes, for example 500.");
+    }
+}
+
+/// Largest frame assumed for packet-count limits (jumbo frame plus headers).
+const MAX_FRAME: u128 = 9018;
+/// A standard full-size Ethernet frame, and what it occupies on the wire.
+const FULL_FRAME: u128 = 1514;
+const PCAP_RECORD: u128 = 16;
+
+/// Upper bound on what the capture writes. `looped_all` is true when the
+/// command loops over every interface, so their number is not in the command.
+fn estimate(cfg: &Config, st: &State, looped_all: bool, cx: &mut Ctx) -> Estimate {
+    if !st.write {
+        return Estimate {
+            kind: "none",
+            headline: "No disk space used".into(),
+            lines: vec!["Packets are printed to the screen, not written to a file.".into()],
+            need_nodes: false,
+            need_ifaces: false,
+            need_link: false,
+        };
+    }
+    let value = |role: Role| -> Option<u128> {
+        let f = cfg.flags.iter().find(|f| f.role == Some(role))?;
+        st.flags.get(f.key())?.parse().ok()
+    };
+    let name = |role: Role| cfg.flags.iter().find(|f| f.role == Some(role)).map_or("?", |f| f.name.as_str());
+    let snap = value(Role::SnapLength).filter(|s| *s > 0);
+    let (size_mb, count) = (value(Role::FileSizeMb), value(Role::FileCount));
+    let (seconds, packets) = (value(Role::RotateSeconds), value(Role::PacketCount));
+    let speed: u128 = st.link_speed.parse().unwrap_or(cfg.estimate.default_link_speed_gbit.into());
+
+    // Every limit that applies, as (bytes, kind, explanation); the smallest wins.
+    let mut limits: Vec<(u128, &'static str, Vec<String>)> = Vec::new();
+    if let (Some(mb), Some(n)) = (size_mb, count) {
+        limits.push((
+            mb * 1_000_000 * n,
+            "exact",
+            vec![format!(
+                "{} of {mb} MB per interface ({} × {}). The oldest file is overwritten, so this is a hard limit; the capture runs until it is stopped.",
+                plural(n, "file"), name(Role::FileSizeMb), name(Role::FileCount)
+            )],
+        ));
+    } else if let (Some(secs), Some(n), None) = (seconds, count, size_mb) {
+        let duration = secs * n;
+        let bytes = speed * 1_000_000_000 / 8 * 2 * duration;
+        let mut lines = vec![format!(
+            "The capture runs for {} ({} × {}). The size depends on the traffic; this assumes a {speed} Gbit/s link completely full in both directions the whole time, so real captures are normally far smaller.",
+            human_duration(duration), name(Role::RotateSeconds), name(Role::FileCount)
+        )];
+        if let Some(s) = snap.filter(|s| *s < FULL_FRAME) {
+            let typical = bytes * (s + PCAP_RECORD) / (FULL_FRAME + 20);
+            lines.push(format!(
+                "If that traffic is mostly full-size 1500-byte frames, the {s}-byte snap length cuts it to about {} per interface.",
+                human_size(typical)
+            ));
+        }
+        limits.push((bytes, "worst", lines));
+    }
+    if let Some(n) = packets {
+        let per_packet = snap.unwrap_or(MAX_FRAME).min(MAX_FRAME) + PCAP_RECORD;
+        limits.push((
+            n * per_packet + 24,
+            "exact",
+            vec![format!("The capture stops after {} ({}) of at most {per_packet} bytes each.", plural(n, "packet"), name(Role::PacketCount))],
+        ));
+    }
+
+    let nodes: Option<u128> = match st.scope.as_str() {
+        "nodes" => Some(count_nodes(&st.nodes)),
+        "all" => st.est_nodes.parse().ok(),
+        _ => Some(1),
+    };
+    let ifaces: Option<u128> = match (st.iface_mode.as_str(), looped_all) {
+        ("all", true) => st.est_ifaces.parse().ok(),
+        ("all", false) => Some(1),
+        _ => Some(st.ifaces.len() as u128),
+    };
+    let need_nodes = st.scope == "all";
+    let free: Option<u128> = st.free_space.parse::<f64>().ok().map(|gb| (gb * 1e9) as u128);
+
+    let Some((per_stream, kind, mut lines)) = limits.into_iter().min_by_key(|l| l.0) else {
+        let reason = match (size_mb, seconds) {
+            (Some(mb), _) => format!("{} without {} keeps creating {mb} MB files until the capture is stopped.", name(Role::FileSizeMb), name(Role::FileCount)),
+            (None, Some(s)) => format!("{} without {} starts a new file every {} and never stops.", name(Role::RotateSeconds), name(Role::FileCount), human_duration(s)),
+            _ => "Nothing rotates or limits the file, so it grows until the capture is stopped.".to_string(),
+        };
+        cx.warn("estimate", format!("This capture has no size limit and can fill the drive. {reason} Add a file count or a packet count to cap it."));
+        return Estimate { kind: "unbounded", headline: "No upper limit".into(), lines: vec![reason], need_nodes: false, need_ifaces: false, need_link: false };
+    };
+
+    let prefix = if kind == "worst" { "Worst case" } else { "Up to" };
+    let total = nodes.zip(ifaces).map(|(n, i)| per_stream * n * i);
+    let headline = match (total, nodes, ifaces) {
+        (Some(t), _, _) => format!("{prefix} {}", human_size(t)),
+        (None, Some(n), None) => format!("{prefix} {} per interface", human_size(per_stream * n)),
+        (None, None, Some(i)) => format!("{prefix} {} per node", human_size(per_stream * i)),
+        _ => format!("{prefix} {} per interface, per node", human_size(per_stream)),
+    };
+    if let (Some(t), Some(n), Some(i)) = (total, nodes, ifaces) {
+        if n * i > 1 {
+            lines.push(format!("{} per interface × {} × {}.", human_size(per_stream), plural(i, "interface"), plural(n, "node")));
+        }
+        let _ = t;
+    } else {
+        let missing = match (nodes, ifaces) {
+            (None, None) => "the number of nodes and of interfaces per node",
+            (None, _) => "the number of nodes",
+            _ => "the number of interfaces per node",
+        };
+        lines.push(format!("Enter {missing} below to get the total."));
+    }
+    if let Some(free) = free {
+        let compared = total.unwrap_or(per_stream);
+        if compared > free {
+            let what = if kind == "worst" { "The worst case" } else { "The capture" };
+            let scope = if total.is_some() { "" } else { ", before multiplying by the missing counts" };
+            cx.warn(
+                "free_space",
+                format!("{what} ({}{scope}) is larger than the {} GB of free space entered, so it can fill the drive.", human_size(compared), st.free_space),
+            );
+        }
+    }
+    Estimate { kind, headline, lines, need_nodes, need_ifaces: looped_all && st.iface_mode == "all", need_link: kind == "worst" }
 }
 
 fn target_of<'a>(cfg: &'a Config, st: &State) -> &'a Target {
@@ -571,11 +792,14 @@ fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
     }
     let stop_command = background.then(|| wrap(&target.stop, &mut cx));
 
+    check_estimate_inputs(cfg, &st, &mut cx);
     let failed = cx.issues.iter().any(|i| i.level == "error");
+    let estimate = (!failed).then(|| estimate(cfg, &st, loop_list.is_some() && st.iface_mode == "all", &mut cx));
     Output {
         command: if failed { String::new() } else { cmd },
         stop_command: if failed { None } else { stop_command },
         issues: cx.issues,
+        estimate,
         state: st,
     }
 }
@@ -678,6 +902,81 @@ mod tests {
             assert!(!errors(&o).is_empty(), "{q} should be rejected");
             assert!(o.command.is_empty(), "{q} must not yield a command");
             assert!(o.stop_command.is_none());
+        }
+    }
+
+    fn warnings(o: &Output) -> Vec<&str> {
+        o.issues.iter().filter(|i| i.level == "warning").map(|i| i.message.as_str()).collect()
+    }
+
+    #[test]
+    fn estimate_for_a_ring_buffer_is_exact() {
+        // 10 files of 1024 MB on 2 interfaces of this node.
+        let o = run("v=1&if=bxe0,bxe1&w=1&bg=1&f.s=600&f.C=1024&f.W=10");
+        let e = o.estimate.as_ref().unwrap();
+        assert_eq!((e.kind, e.headline.as_str()), ("exact", "Up to 20.5 GB"));
+        assert!(!e.need_nodes && !e.need_ifaces && !e.need_link);
+        assert!(warnings(&o).is_empty(), "{:?}", o.issues);
+        // Named nodes are counted from the list, ranges included.
+        let o = run("v=1&sc=nodes&n=1,2,5-8&if=lagg1&w=1&bg=1&f.C=1000&f.W=100");
+        assert_eq!(o.estimate.unwrap().headline, "Up to 600 GB");
+    }
+
+    #[test]
+    fn estimate_asks_for_counts_the_command_cannot_know() {
+        let q = "v=1&sc=all&im=all&w=1&bg=1&f.C=500&f.W=5";
+        let e = run(q).estimate.unwrap();
+        assert!(e.need_nodes && e.need_ifaces);
+        assert_eq!(e.headline, "Up to 2.5 GB per interface, per node");
+        assert!(e.lines.last().unwrap().contains("number of nodes and of interfaces"));
+        let e = run(&format!("{q}&en=4")).estimate.unwrap();
+        assert_eq!(e.headline, "Up to 10.0 GB per interface");
+        let e = run(&format!("{q}&en=4&ei=3")).estimate.unwrap();
+        assert_eq!(e.headline, "Up to 30.0 GB");
+        // Linux "any" is one capture, so nothing needs to be asked.
+        let e = run("v=1&t=linux&im=all&w=1&f.C=500&f.W=5").estimate.unwrap();
+        assert!(!e.need_ifaces && e.headline == "Up to 2.5 GB");
+    }
+
+    #[test]
+    fn estimate_for_a_timed_capture_is_the_full_link_worst_case() {
+        // 4 hours at 10 Gbit/s, both directions: 2.5 GB/s x 14400 s = 36 TB.
+        let o = run("v=1&if=lagg0&w=1&f.s=600&f.G=3600&f.W=4");
+        let e = o.estimate.as_ref().unwrap();
+        assert_eq!((e.kind, e.headline.as_str(), e.need_link), ("worst", "Worst case 36.0 TB", true));
+        assert!(e.lines[0].contains("4 hours") && e.lines[1].contains("600-byte snap length"));
+        let e = run("v=1&if=lagg0&w=1&f.s=0&f.G=300&f.W=1&ls=1").estimate.unwrap();
+        assert_eq!(e.headline, "Worst case 75.0 GB");
+        assert_eq!(e.lines.len(), 1);
+        // A packet count caps it exactly, and the smaller limit wins.
+        let e = run("v=1&if=lagg0&w=1&f.s=600&f.G=3600&f.W=4&f.c=1000").estimate.unwrap();
+        assert_eq!((e.kind, e.headline.as_str()), ("exact", "Up to 616 KB"));
+    }
+
+    #[test]
+    fn warns_when_nothing_caps_the_capture_or_it_exceeds_free_space() {
+        for q in ["v=1&w=1", "v=1&w=1&f.s=600", "v=1&w=1&f.C=1024", "v=1&w=1&f.G=3600"] {
+            let o = run(q);
+            assert_eq!(o.estimate.as_ref().unwrap().kind, "unbounded", "{q}");
+            assert!(warnings(&o).iter().any(|w| w.contains("can fill the drive")), "{q}");
+            assert!(!o.command.is_empty());
+        }
+        let q = "v=1&if=bxe0,bxe1&w=1&bg=1&f.C=1024&f.W=10";
+        assert!(warnings(&run(&format!("{q}&fs=50"))).is_empty());
+        let o = run(&format!("{q}&fs=20"));
+        assert!(warnings(&o)[0].contains("larger than the 20 GB of free space"));
+        // Printing to the screen uses no disk and never warns.
+        let o = run("v=1&t=linux&w=0&fs=1");
+        assert_eq!(o.estimate.as_ref().unwrap().kind, "none");
+        assert!(warnings(&o).is_empty());
+    }
+
+    #[test]
+    fn estimate_inputs_are_validated_and_fixable() {
+        for q in ["en=0", "en=abc", "ei=-1", "ls=7", "fs=lots", "fs=1e400"] {
+            assert!(!errors(&run(q)).is_empty(), "{q}");
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}");
         }
     }
 

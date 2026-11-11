@@ -51,6 +51,7 @@ front, do not configure it to cache HTML.
 | --- | --- |
 | `[site]` | `url` is the public address used for share links. Change it to host the app anywhere; leave it empty to use the address the visitor is on. `[site.repo]` and `[site.license]` are footer links; set `enabled = false` to hide one. |
 | `[theme]` | `mode` (`auto`, `light` or `dark`) and the hex colours for `[theme.light]` and `[theme.dark]`. Any colour left out keeps its default. |
+| `[estimate]` | Link speeds offered for the worst-case estimate of timed captures, and the default. |
 | `[[targets]]` | A system: tcpdump command, output folder, file and log name templates, interface defaults, and the optional `[targets.cluster]` wrappers. |
 | `[[flags]]` | A tcpdump option: type, default, limits, `dependencies`, `exclusions`, a one-line `description`, a longer `explanation`, and `[[flags.recommendations]]`. |
 | `[filter]` | Protocol list and one-click filter snippets. |
@@ -109,6 +110,24 @@ confirm:
 - a value that is not a number, or not an allowed choice, goes to the flag's default;
 - a flag that clashes with another, or lacks the flag it depends on, is switched off;
 - invalid interfaces, hosts, networks, ports, subfolders and filter text are removed.
+
+## Capture size estimate
+
+The result panel shows how much disk the capture can use:
+
+- **Rotation by size** (`-C` with `-W`) or a **packet count** gives an exact
+  upper limit.
+- **Rotation by time** (`-G` with `-W`) depends on traffic, so the figure is a
+  worst case: a link of the chosen speed completely full in both directions.
+  A second line shows what the snap length saves on full-size frames.
+- When the command runs on all nodes or loops over all interfaces, their
+  number is not in the command, so the box asks for a count.
+- A warning appears when nothing caps the capture (no `-W`, or no rotation),
+  and when the estimate is larger than the free space entered.
+
+Flags are matched to these meanings with `role` in the TOML, and the link
+speeds offered come from `[estimate]`. The counts, link speed and free space
+are stored in the share link but never change the command.
 
 ## Safety
 

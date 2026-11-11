@@ -54,12 +54,49 @@ function serialise(skip = []) {
     const k = flagKey(f);
     if (k in s.flags) p.push([`f.${k}`, f.value_type === "Bool" ? "1" : flagValues[k] ?? ""]);
   }
+  p.push(...estimatePairs());
   if (list(s.hosts)) p.push(["h", list(s.hosts)]);
   if (list(s.ports)) p.push(["p", list(s.ports)]);
   if (list(s.nets)) p.push(["net", list(s.nets)]);
   if (s.proto) p.push(["pr", s.proto]);
   if (s.raw.trim()) p.push(["q", s.raw.trim()]);
   return p.filter(([k]) => !skip.includes(k)).map(([k, v]) => `${k}=${enc(v)}`).join("&");
+}
+
+// Estimate inputs: only the ones that are filled in or differ from the default.
+function estimatePairs() {
+  const s = state;
+  const p = [];
+  if (s.est_nodes.trim()) p.push(["en", s.est_nodes.trim()]);
+  if (s.est_ifaces.trim()) p.push(["ei", s.est_ifaces.trim()]);
+  if (s.link_speed !== String(config.estimate.default_link_speed_gbit)) p.push(["ls", s.link_speed]);
+  if (s.free_space.trim()) p.push(["fs", s.free_space.trim()]);
+  return p;
+}
+
+const ESTIMATE_INPUTS = ["est_nodes", "est_ifaces", "link_speed", "free_space"];
+
+// Put the state into the estimate inputs. They live outside the form so they
+// are never rebuilt while someone is typing in them.
+function syncEstimateInputs() {
+  $("#link_speed").replaceChildren(...config.estimate.link_speeds_gbit.map((g) =>
+    el("option", { value: String(g), text: `${g} Gbit/s` })));
+  for (const id of ESTIMATE_INPUTS) {
+    const input = document.getElementById(id);
+    if (input.value !== state[id]) input.value = state[id];
+  }
+}
+
+function showEstimate(est) {
+  $("#estimate").hidden = !est;
+  if (!est) return;
+  $("#est-headline").textContent = est.headline;
+  $("#est-headline").className = est.kind;
+  $("#est-lines").replaceChildren(...est.lines.map((l) => el("li", { text: l })));
+  $("#est-inputs").hidden = est.kind === "none";
+  $("#est_nodes-field").hidden = !est.need_nodes;
+  $("#est_ifaces-field").hidden = !est.need_ifaces;
+  $("#link_speed-field").hidden = !est.need_link;
 }
 
 function adopt(serverState) {
@@ -219,6 +256,7 @@ function renderForm() {
       }))));
 
   $("#form").replaceChildren(system, where, output, flags, filter);
+  syncEstimateInputs();
   markFields(lastIssues);
   if (focused) document.getElementById(focused)?.focus();
 }
@@ -227,7 +265,7 @@ function renderForm() {
 
 // ---- problems: flag the fields, offer a fix ---------------------------------
 
-const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw"];
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space"];
 let lastIssues = [];
 let pendingFix = null;
 
@@ -235,7 +273,7 @@ let pendingFix = null;
 function markFields(issues) {
   lastIssues = issues;
   for (const n of document.querySelectorAll(".field-error")) n.remove();
-  for (const n of document.querySelectorAll("#form .invalid")) {
+  for (const n of document.querySelectorAll(".invalid")) {
     n.classList.remove("invalid");
     n.removeAttribute("aria-invalid");
   }
@@ -319,6 +357,7 @@ function showOutput(out, keepText) {
   markEdited();
   $("#issues").replaceChildren(...out.issues.map((i) => el("li", { class: i.level, text: i.message })));
   $("#fix").hidden = !out.issues.some((i) => i.level === "error");
+  showEstimate(out.estimate);
   markFields(out.issues);
   $("#stop").hidden = !out.stop_command;
   $("#stop-command").textContent = out.stop_command || "";
@@ -329,7 +368,8 @@ function showOutput(out, keepText) {
 async function parseCommand() {
   const text = $("#command").value;
   const seq = ++buildSeq;
-  const res = await fetch(`api/parse?t=${enc(state.target)}`, { method: "POST", body: text });
+  const keep = [["t", state.target], ...estimatePairs()].map(([k, v]) => `${k}=${enc(v)}`).join("&");
+  const res = await fetch(`api/parse?${keep}`, { method: "POST", body: text });
   if (!res.ok) throw new Error(`api/parse: ${res.status}`);
   const result = await res.json();
   if (seq !== buildSeq) return;
@@ -442,6 +482,13 @@ async function main() {
     showNotes([]);
   });
   window.addEventListener("resize", fitCommand);
+  for (const id of ESTIMATE_INPUTS) {
+    const input = document.getElementById(id);
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
+      state[id] = input.value;
+      changed(false);
+    });
+  }
   $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
   $("#fix-apply").addEventListener("click", applyFix);
   $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());
