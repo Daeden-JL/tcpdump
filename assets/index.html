@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tcpdump command builder</title>
+<meta name="description" content="Build, adjust and share tcpdump commands for PowerScale and Linux.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1 id="title">tcpdump.dev</h1>
+  <p id="tagline"></p>
+</header>
+<p id="config-error" class="banner" role="alert" hidden></p>
+<main>
+  <form id="form" autocomplete="off" novalidate></form>
+  <aside id="result" aria-live="polite">
+    <div class="result-head">
+      <h2>Command</h2>
+      <button type="button" id="copy-command" class="primary">Copy</button>
+    </div>
+    <pre id="command" tabindex="0"></pre>
+    <ul id="issues"></ul>
+    <div id="stop" hidden>
+      <div class="result-head">
+        <h3>To stop the capture</h3>
+        <button type="button" id="copy-stop">Copy</button>
+      </div>
+      <pre id="stop-command" tabindex="0"></pre>
+    </div>
+    <p id="stop-note" class="note" hidden>The capture runs in the foreground. Press Ctrl-C to stop it.</p>
+    <div class="actions">
+      <button type="button" id="copy-link">Copy link to this setup</button>
+      <button type="button" id="reset">Reset</button>
+    </div>
+    <p class="note">Everything you set is stored in the page address, so the link reproduces this exact command.</p>
+  </aside>
+</main>
+<section id="examples-section">
+  <h2>Examples</h2>
+  <p class="note">Load one into the builder and adjust it.</p>
+  <div id="examples"></div>
+</section>
+<footer><p>Check interface names, paths and free disk space before running a capture.</p></footer>
+<script src="app.js"></script>
+</body>
+</html>
