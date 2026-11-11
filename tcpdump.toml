@@ -1,0 +1,351 @@
+# tcpdump.dev configuration.
+#
+# The server watches this file. Save it and every open page updates within a
+# moment; no restart needed. If an edit does not parse or validate, the
+# previous version stays live and the page shows the error.
+# (Only `site.listen` needs a restart.)
+
+version = "1.0"
+
+[site]
+# Public address of the site. Share links are built from this, so change it
+# when hosting the app somewhere else. Leave empty to use whatever address
+# the visitor's browser is on.
+url = "https://tcpdump.dev"
+title = "tcpdump.dev"
+tagline = "Build, adjust and share tcpdump commands for PowerScale and Linux."
+listen = "127.0.0.1:8080"
+
+# ---------------------------------------------------------------------------
+# Targets: the systems a command can be generated for.
+#
+# Templates may use these placeholders:
+#   file_name / log_name : {hostname} {timestamp} {iface}
+#   prepare              : {dir}
+#   log_redirect         : {log} {dir}
+#   cluster templates    : {command} {nodes}
+# ---------------------------------------------------------------------------
+
+[[targets]]
+id = "powerscale"
+name = "PowerScale (OneFS)"
+description = "Dell PowerScale / Isilon cluster. Captures land on /ifs so every node can write to the same folder."
+command = "tcpdump"
+output_dir = "/ifs/data/Isilon_Support"
+date_subdir = "$(date +%F)"
+hostname = "$(uname -n)"
+file_name = "{hostname}.{timestamp}.{iface}.pcap"
+log_name = "{hostname}.$(date +%F_%H%M%S).{iface}.log"
+prepare = "mkdir -p {dir}"
+log_redirect = "&>> {log}"
+log_default = true
+background_default = true
+stop = "killall -SIGINT tcpdump"
+default_interface = "lagg0"
+interface_hint = "e.g. lagg0, or several: bxe0, bxe1"
+all_interfaces = '`ifconfig | grep -B2 ether | grep flags | cut -d: -f1`'
+
+[targets.cluster]
+all_nodes = "isi_for_array -X '{command}'"
+selected_nodes = "isi_for_array -n{nodes} '{command}'"
+nodes_hint = "e.g. 1,2 or 1-4"
+
+[[targets]]
+id = "linux"
+name = "Linux"
+description = "A Linux client or server. Uses sudo, and the \"any\" pseudo-interface to capture on every interface at once."
+command = "sudo tcpdump"
+output_dir = "~/tcpdump_capture"
+hostname = "$(hostname -s)"
+log_redirect = ">> {log} 2>&1"
+stop = "sudo pkill -INT tcpdump"
+default_interface = "eth0"
+interface_hint = "e.g. eth0, ens192, bond0"
+any_interface = "any"
+
+# ---------------------------------------------------------------------------
+# Flags. -i and -w are generated from the target settings above, so they are
+# not listed here. Flags appear in the command in the order listed.
+#
+#   value_type      Integer | String | Bool | Choice (with `choices = [...]`)
+#   enabled         switched on in a fresh builder
+#   description     one line, always visible
+#   explanation     longer background, shown on demand
+#   recommendations common values with the reason to pick each; one click applies
+#   dependencies    needs at least one of these flags to be on
+#   exclusions      cannot be combined with these flags
+#   targets         limit the flag to some target ids (default: all)
+# ---------------------------------------------------------------------------
+
+[[flags]]
+name = "-s"
+label = "Snap length"
+description = "Bytes captured from each packet. 0 means the whole packet."
+explanation = """
+Each packet is cut off after this many bytes. A smaller value means smaller \
+files and fewer dropped packets on a busy link, but anything past the cut is \
+gone for good, so pick the smallest value that still holds what you need to \
+look at."""
+value_type = "Integer"
+default_value = 900
+enabled = true
+validation = { min = 0, max = 262144 }
+
+[[flags.recommendations]]
+value = 320
+label = "Headers only"
+reason = "Enough for Ethernet, IP and TCP headers plus the start of the payload. Use for connectivity, retransmission and latency questions on very busy links."
+
+[[flags.recommendations]]
+value = 600
+label = "SMB / NFS operations"
+reason = "Holds the full protocol headers of most SMB and NFS calls without the file data. A good default for protocol troubleshooting."
+
+[[flags.recommendations]]
+value = 900
+label = "Larger protocol headers"
+reason = "Room for compound SMB requests, NFSv4 compounds and NDMP messages that do not fit in 600 bytes."
+
+[[flags.recommendations]]
+value = 1500
+label = "Full standard frame"
+reason = "Everything in a standard 1500 MTU frame. Use for authentication, Kerberos or DNS problems where the payload matters."
+
+[[flags.recommendations]]
+value = 0
+label = "Whole packet"
+reason = "Nothing is cut off, including jumbo frames. Largest files; use when the data itself is in question or the capture is short."
+
+[[flags]]
+name = "-C"
+label = "Rotate by size"
+description = "Start a new file each time the current one reaches this many megabytes."
+explanation = """
+Together with -W this makes a ring buffer: once the last file is full the \
+oldest one is overwritten, so the capture can run until the problem happens \
+without filling the disk. Total disk use is -C times -W, per interface and \
+per node."""
+value_type = "Integer"
+default_value = 1024
+validation = { min = 1, max = 102400 }
+
+[[flags.recommendations]]
+value = 500
+label = "500 MB files"
+reason = "Opens quickly in Wireshark and uploads easily."
+
+[[flags.recommendations]]
+value = 1024
+label = "1 GB files"
+reason = "Fewer files to manage on fast links; still workable in Wireshark."
+
+[[flags]]
+name = "-G"
+label = "Rotate by time"
+description = "Start a new file every N seconds."
+explanation = """
+With -W the capture ends by itself after -W files, so -G 3600 -W 4 captures \
+for four hours in one-hour pieces. The file name carries the start time of \
+each piece."""
+value_type = "Integer"
+default_value = 3600
+enabled = true
+validation = { min = 1, max = 86400 }
+exclusions = ["-C"]
+
+[[flags.recommendations]]
+value = 300
+label = "5 minutes"
+reason = "Small pieces; easy to find the moment of a short, known event."
+
+[[flags.recommendations]]
+value = 3600
+label = "1 hour"
+reason = "A sensible piece size for captures that run for hours."
+
+[[flags]]
+name = "-W"
+label = "File count"
+description = "Number of files to keep (with -C) or to write before stopping (with -G)."
+explanation = """
+With -C the files form a ring and the oldest is overwritten. With -G tcpdump \
+exits after writing this many files, which gives the capture a fixed length."""
+value_type = "Integer"
+default_value = 4
+enabled = true
+dependencies = ["-C", "-G"]
+validation = { min = 1, max = 1000 }
+
+[[flags.recommendations]]
+value = 1
+label = "One file"
+reason = "With -G: a single timed capture that stops by itself."
+
+[[flags.recommendations]]
+value = 10
+label = "10 files"
+reason = "With -C 1024: a 10 GB ring per interface, enough to catch most intermittent problems."
+
+[[flags]]
+name = "-c"
+label = "Packet count"
+description = "Stop after capturing this many packets."
+value_type = "Integer"
+default_value = 1000
+validation = { min = 1, max = 2000000000 }
+
+[[flags]]
+name = "-B"
+label = "Buffer size"
+description = "Capture buffer size in KiB."
+explanation = """
+A larger buffer lets the kernel hold more packets while tcpdump is busy \
+writing, which reduces "packets dropped by kernel" on fast links."""
+value_type = "Integer"
+default_value = 4096
+validation = { min = 1, max = 2147483647 }
+
+[[flags.recommendations]]
+value = 4096
+label = "4 MiB"
+reason = "A modest increase for 10 GbE links that show a few drops."
+
+[[flags.recommendations]]
+value = 65536
+label = "64 MiB"
+reason = "For 25/40/100 GbE links or when drops continue with a smaller buffer."
+
+[[flags]]
+name = "-nn"
+label = "No name lookups"
+description = "Show addresses and ports as numbers."
+explanation = "Skips DNS and service-name lookups. Output is faster, and the capture itself does not generate DNS traffic. Only affects printed output, not files written with -w."
+value_type = "Bool"
+
+[[flags]]
+name = "-e"
+label = "Link-level header"
+description = "Print MAC addresses and VLAN tags on each line."
+value_type = "Bool"
+
+[[flags]]
+name = "-v"
+label = "Verbose"
+description = "Print more detail for each packet (TTL, IP id, checksums)."
+value_type = "Bool"
+
+[[flags]]
+name = "-tttt"
+label = "Full timestamps"
+description = "Print the date and time on each line instead of only the time."
+value_type = "Bool"
+
+[[flags]]
+name = "-p"
+label = "No promiscuous mode"
+description = "Do not put the interface into promiscuous mode."
+value_type = "Bool"
+
+[[flags]]
+name = "-Z"
+label = "Run as user"
+description = "User that tcpdump switches to after opening the interface."
+explanation = """
+Many Linux distributions make tcpdump drop to an unprivileged user before it \
+opens the output file, which fails with "Permission denied" when writing \
+into a home directory. -Z root keeps it running as root."""
+value_type = "String"
+default_value = "root"
+targets = ["linux"]
+
+[[flags.recommendations]]
+value = "root"
+label = "root"
+reason = "Fixes \"Permission denied\" on the output file when writing with -w under sudo."
+
+# ---------------------------------------------------------------------------
+# Capture filter helpers.
+# ---------------------------------------------------------------------------
+
+[filter]
+protocols = ["tcp", "udp", "icmp", "arp"]
+
+[[filter.snippets]]
+label = "SMB"
+expression = "port 445"
+
+[[filter.snippets]]
+label = "NFS"
+expression = "port 2049 or port 111"
+
+[[filter.snippets]]
+label = "DNS"
+expression = "port 53"
+
+[[filter.snippets]]
+label = "Kerberos / LDAP"
+expression = "port 88 or port 389 or port 636"
+
+[[filter.snippets]]
+label = "NDMP"
+expression = "port 10000"
+
+[[filter.snippets]]
+label = "TCP SYN / RST only"
+expression = "tcp[13] & 6 != 0"
+
+# ---------------------------------------------------------------------------
+# Examples. `query` is the builder state exactly as it appears in a share
+# link: set the builder up the way you want, then copy everything after the
+# "?" from the address bar. The command shown is generated from it.
+# ---------------------------------------------------------------------------
+
+[[examples]]
+title = "Timed capture, one interface"
+description = "One interface on this node for 4 hours in 1-hour files, filtered to one client."
+query = "v=1&t=powerscale&sc=node&im=named&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=3600&f.W=4&h=192.168.1.1"
+
+[[examples]]
+title = "Timed capture, two interfaces on two nodes"
+description = "Nodes 1 and 2, two interfaces each, 4 hours in 1-hour files under an NDMP subfolder."
+query = "v=1&t=powerscale&sc=nodes&n=1,2&im=named&if=cxgb0,cxgb1&w=1&sd=NDMP&dd=1&lg=1&bg=1&f.s=900&f.G=3600&f.W=4&h=192.168.1.1,192.168.1.2"
+
+[[examples]]
+title = "Timed capture, all nodes, 5-minute files for 10 hours"
+description = "Two interfaces on every node, full frames, 120 files of 5 minutes each."
+query = "v=1&t=powerscale&sc=all&im=named&if=cxgb0,cxgb1&w=1&sd=CIFS&dd=1&lg=1&bg=1&f.s=1500&f.G=300&f.W=120&h=192.168.1.1,192.168.1.2"
+
+[[examples]]
+title = "Clusterwide 5-minute snapshot, all interfaces"
+description = "Every external interface on every node for 5 minutes, headers only, no filter."
+query = "v=1&t=powerscale&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=320&f.G=300&f.W=1"
+
+[[examples]]
+title = "Rolling capture, 10 GB ring per interface"
+description = "Runs until stopped, keeping the most recent ten 1 GB files per interface on this node."
+query = "v=1&t=powerscale&sc=node&im=named&if=bxe0,bxe1&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=1024&f.W=10&h=192.168.1.1"
+
+[[examples]]
+title = "Rolling capture on selected nodes, 100 GB ring"
+description = "One interface on nodes 1 to 4, keeping the most recent hundred 1 GB files per node."
+query = "v=1&t=powerscale&sc=nodes&n=1,2,3,4&im=named&if=lagg1&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=1024&f.W=100&h=192.168.1.1"
+
+[[examples]]
+title = "Clusterwide rolling capture, all interfaces"
+description = "Every external interface on every node, five 500 MB files each, filtered to two clients."
+query = "v=1&t=powerscale&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&h=192.168.1.1,192.168.1.2"
+
+[[examples]]
+title = "One node, one subnet, larger buffer"
+description = "Node 17 only, whole packets, filtered to a subnet, with a large capture buffer."
+query = "v=1&t=powerscale&sc=nodes&n=17&im=named&if=lagg0&w=1&dd=1&lg=0&bg=1&f.s=0&f.C=500&f.W=10&f.B=65536&net=172.26.0.0/16"
+
+[[examples]]
+title = "Linux: watch DNS live"
+description = "Print DNS packets from every interface as they arrive."
+query = "v=1&t=linux&im=all&w=0&f.s=900&f.nn=1&p=53"
+
+[[examples]]
+title = "Linux: rolling capture of SMB and NFS"
+description = "One interface, five 500 MB files, kept running as root so the files can be written."
+query = "v=1&t=linux&im=named&if=eth0&w=1&dd=1&lg=0&bg=0&f.s=600&f.C=500&f.W=5&f.Z=root&p=445,2049"
