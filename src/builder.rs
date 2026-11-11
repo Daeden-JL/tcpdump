@@ -300,8 +300,8 @@ fn value_ok(f: &Flag, value: &str) -> bool {
     }
 }
 
-/// The closest acceptable value: the nearer limit for a number out of range,
-/// otherwise the flag's default. `None` when there is nothing usable.
+/// The closest acceptable value: the nearer limit for a number out of range
+/// (or the flag's `over_max` when it is too large), otherwise the default. `None` when there is nothing usable.
 fn nearest_value(f: &Flag, value: &str) -> Option<String> {
     if let (ValueType::Integer, Ok(n)) = (f.value_type, value.parse::<i64>()) {
         let v = f.validation.as_ref();
@@ -309,7 +309,7 @@ fn nearest_value(f: &Flag, value: &str) -> Option<String> {
             return Some(min.to_string());
         }
         if let Some(max) = v.and_then(|v| v.max).filter(|m| n > *m) {
-            return Some(max.to_string());
+            return Some(v.and_then(|v| v.over_max).unwrap_or(max).to_string());
         }
     }
     if value_ok(f, &f.default_value) {
@@ -686,9 +686,15 @@ mod tests {
         let f = fix(&cfg(), &parse_query("v=1&t=powerscale&f.s=99999999&f.C=0&f.B=abc&f.W=4"));
         assert!(errors(&f.output).is_empty(), "{:?}", f.output.issues);
         let flags = &f.output.state.flags;
-        assert_eq!((flags["s"].as_str(), flags["C"].as_str(), flags["B"].as_str()), ("262144", "1", "4096"));
+        // Too-large snap lengths mean "everything", so they go to 0, not the limit.
+        assert_eq!((flags["s"].as_str(), flags["C"].as_str(), flags["B"].as_str()), ("0", "1", "4096"));
         assert_eq!(f.changes.len(), 3, "{:?}", f.changes);
-        assert!(f.changes[0].contains("-s changed from 99999999 to 262144"));
+        assert!(f.changes[0].contains("-s changed from 99999999 to 0."));
+
+        // Without over_max a value above the limit moves to the limit; below min moves to min.
+        let f = fix(&cfg(), &parse_query("v=1&f.s=-5&f.C=999999999"));
+        let flags = &f.output.state.flags;
+        assert_eq!((flags["s"].as_str(), flags["C"].as_str()), ("0", "102400"));
     }
 
     #[test]

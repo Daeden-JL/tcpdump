@@ -255,6 +255,10 @@ pub struct Recommendation {
 pub struct Validation {
     pub min: Option<i64>,
     pub max: Option<i64>,
+    /// What Fix uses for a value above `max`, instead of `max` itself
+    /// (for snap length, 0: "whole packet" is what a huge value means).
+    #[serde(default)]
+    pub over_max: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -387,6 +391,12 @@ impl Config {
             }
             if !names.insert(key) {
                 return Err(format!("duplicate flag {:?}", f.name));
+            }
+            if let Some(v) = &f.validation {
+                let outside = |n: i64| v.min.is_some_and(|m| n < m) || v.max.is_some_and(|m| n > m);
+                if v.over_max.is_some_and(outside) {
+                    return Err(format!("flag {}: validation.over_max must itself be between min and max", f.name));
+                }
             }
             if f.value_type == ValueType::Choice && f.choices.is_empty() {
                 return Err(format!("flag {} has value_type Choice but no choices", f.name));

@@ -126,6 +126,8 @@ any_interface = "any"
 #   description     one line, always visible
 #   explanation     longer background, shown on demand
 #   recommendations common values with the reason to pick each; one click applies
+#   validation      { min, max } limits; optional over_max is what Fix uses
+#                   for a value above max (default: max itself)
 #   dependencies    needs at least one of these flags to be on
 #   exclusions      cannot be combined with these flags
 #   targets         limit the flag to some target ids (default: all)
@@ -143,7 +145,8 @@ look at."""
 value_type = "Integer"
 default_value = 900
 enabled = true
-validation = { min = 0, max = 262144 }
+# A value above the maximum is repaired to 0 (whole packet) rather than to the maximum.
+validation = { min = 0, max = 262144, over_max = 0 }
 
 [[flags.recommendations]]
 value = 320

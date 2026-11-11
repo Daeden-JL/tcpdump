@@ -103,7 +103,9 @@ value was typed, parsed from a command or came from a shared link.
 **Fix problems…** shows what it would change and applies it only after you
 confirm:
 
-- a number out of range moves to the nearest limit;
+- a number out of range moves to the nearest limit, unless the flag sets
+  `validation.over_max` (snap length does: a value above the maximum becomes `0`,
+  whole packet);
 - a value that is not a number, or not an allowed choice, goes to the flag's default;
 - a flag that clashes with another, or lacks the flag it depends on, is switched off;
 - invalid interfaces, hosts, networks, ports, subfolders and filter text are removed.
