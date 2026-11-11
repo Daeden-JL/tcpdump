@@ -209,4 +209,18 @@ fieldset, #examples-section { scroll-margin-top: 12px; }
 @media (prefers-reduced-motion: no-preference) {
   html { scroll-behavior: smooth; }
 }
+#form .invalid { border-color: var(--error); outline: 1px solid var(--error); }
+.field-error { margin: 4px 0 2px; font-size: 0.85rem; color: var(--error); }
+#fix { margin: 0 0 12px; border-color: var(--error); color: var(--error); }
+dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+}
+dialog::backdrop { background: rgb(0 0 0 / 0.5); }
+#fix-changes { margin: 10px 0; padding-left: 20px; font-size: 0.92rem; overflow-wrap: anywhere; }
+#fix-changes li { margin-bottom: 4px; }
 [hidden] { display: none !important; }

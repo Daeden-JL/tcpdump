@@ -219,10 +219,75 @@ function renderForm() {
       }))));
 
   $("#form").replaceChildren(system, where, output, flags, filter);
+  markFields(lastIssues);
   if (focused) document.getElementById(focused)?.focus();
 }
 
 // ---- output ---------------------------------------------------------------
+
+// ---- problems: flag the fields, offer a fix ---------------------------------
+
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw"];
+let lastIssues = [];
+let pendingFix = null;
+
+// Outline each setting that has an error and put the message next to it.
+function markFields(issues) {
+  lastIssues = issues;
+  for (const n of document.querySelectorAll(".field-error")) n.remove();
+  for (const n of document.querySelectorAll("#form .invalid")) {
+    n.classList.remove("invalid");
+    n.removeAttribute("aria-invalid");
+  }
+  for (const issue of issues) {
+    if (issue.level !== "error") continue;
+    let input = null;
+    let anchor = null;
+    if (issue.field.startsWith("f.")) {
+      const key = issue.field.slice(2);
+      input = document.getElementById(`flag-${key}-value`) || document.getElementById(`flag-${key}`);
+      anchor = input && input.closest(".flag-head");
+    } else if (FIELD_IDS.includes(issue.field)) {
+      input = document.getElementById(issue.field);
+      anchor = input && input.closest(".field");
+    }
+    if (!input || !anchor) continue;
+    input.classList.add("invalid");
+    input.setAttribute("aria-invalid", "true");
+    anchor.after(el("p", { class: "field-error", text: issue.message }));
+  }
+}
+
+// Ask the server what it would change, then let the user confirm.
+async function proposeFix() {
+  const result = await getJSON(`api/fix?${serialise()}`);
+  const left = result.output.issues.filter((i) => i.level === "error").length;
+  pendingFix = result.changes.length ? result : null;
+  $("#fix-title").textContent = pendingFix ? "Apply these fixes?" : "Nothing to fix automatically";
+  $("#fix-intro").textContent = !pendingFix
+    ? "These problems need to be corrected by hand."
+    : left
+      ? `These changes will be made to your settings. ${left} problem${left === 1 ? "" : "s"} will remain to correct by hand.`
+      : "These changes will be made to your settings, and the command will be rewritten to match.";
+  $("#fix-changes").replaceChildren(...result.changes.map((c) => el("li", { text: c })));
+  $("#fix-apply").hidden = !pendingFix;
+  $("#fix-cancel").textContent = pendingFix ? "Cancel" : "Close";
+  $("#fix-dialog").showModal();
+}
+
+function applyFix() {
+  $("#fix-dialog").close();
+  if (!pendingFix) return;
+  const out = pendingFix.output;
+  pendingFix = null;
+  buildSeq++;
+  flagValues = {};
+  adopt(out.state);
+  renderForm();
+  showOutput(out);
+  showNotes([]);
+  history.replaceState(null, "", `?${serialise()}`);
+}
 
 let generated = ""; // the command as the builder last wrote it
 
@@ -253,6 +318,8 @@ function showOutput(out, keepText) {
   if (!keepText) $("#command").value = out.command;
   markEdited();
   $("#issues").replaceChildren(...out.issues.map((i) => el("li", { class: i.level, text: i.message })));
+  $("#fix").hidden = !out.issues.some((i) => i.level === "error");
+  markFields(out.issues);
   $("#stop").hidden = !out.stop_command;
   $("#stop-command").textContent = out.stop_command || "";
   $("#stop-note").hidden = !out.command || !!out.stop_command;
@@ -375,6 +442,9 @@ async function main() {
     showNotes([]);
   });
   window.addEventListener("resize", fitCommand);
+  $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
+  $("#fix-apply").addEventListener("click", applyFix);
+  $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());
   $("#copy-stop").addEventListener("click", (e) => copy($("#stop-command").textContent, e.currentTarget));
   $("#copy-link").addEventListener("click", (e) => copy(shareLink(), e.currentTarget));
   $("#reset").addEventListener("click", async () => {

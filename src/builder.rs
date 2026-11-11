@@ -128,6 +128,26 @@ fn valid_port(p: &str) -> bool {
     }
 }
 
+fn valid_iface(s: &str) -> bool {
+    all_chars(s, "_.:-")
+}
+
+fn valid_host(s: &str) -> bool {
+    all_chars(s, ".:-")
+}
+
+fn valid_net(s: &str) -> bool {
+    all_chars(s, ".:/") && s.starts_with(|c: char| c.is_ascii_hexdigit())
+}
+
+fn valid_subdir(s: &str) -> bool {
+    all_chars(s, "_./-") && !s.split('/').any(|p| p == ".." || p.is_empty())
+}
+
+fn valid_nodes(s: &str) -> bool {
+    all_chars(s, ",-") && s.starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// Wrap in double quotes when the shell would otherwise interpret something.
 fn shell_word(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || " ./:_-".contains(c)) {
@@ -166,13 +186,13 @@ fn build_filter(cfg: &Config, st: &State, cx: &mut Ctx) -> String {
 
     let mut addrs = Vec::new();
     for h in &st.hosts {
-        if !all_chars(h, ".:-") {
+        if !valid_host(h) {
             cx.error("hosts", format!("{h:?} is not a valid host name or IP address."));
         }
         addrs.push(format!("host {h}"));
     }
     for n in &st.nets {
-        if !all_chars(n, ".:/") || !n.starts_with(|c: char| c.is_ascii_hexdigit()) {
+        if !valid_net(n) {
             cx.error("nets", format!("{n:?} is not a valid network, e.g. 172.26.0.0/16."));
         }
         addrs.push(format!("net {n}"));
@@ -267,10 +287,141 @@ fn check_flag(f: &Flag, value: &str, enabled: &dyn Fn(&str) -> bool, cx: &mut Ct
     }
 }
 
+/// Whether `value` is acceptable for the flag on its own (ignoring other flags).
+fn value_ok(f: &Flag, value: &str) -> bool {
+    match f.value_type {
+        ValueType::Bool => true,
+        ValueType::Integer => value.parse::<i64>().is_ok_and(|n| {
+            let v = f.validation.as_ref();
+            !v.and_then(|v| v.min).is_some_and(|m| n < m) && !v.and_then(|v| v.max).is_some_and(|m| n > m)
+        }),
+        ValueType::Choice => f.choices.iter().any(|c| c == value),
+        ValueType::String => all_chars(value, "_./:=,+@%-"),
+    }
+}
+
+/// The closest acceptable value: the nearer limit for a number out of range,
+/// otherwise the flag's default. `None` when there is nothing usable.
+fn nearest_value(f: &Flag, value: &str) -> Option<String> {
+    if let (ValueType::Integer, Ok(n)) = (f.value_type, value.parse::<i64>()) {
+        let v = f.validation.as_ref();
+        if let Some(min) = v.and_then(|v| v.min).filter(|m| n < *m) {
+            return Some(min.to_string());
+        }
+        if let Some(max) = v.and_then(|v| v.max).filter(|m| n > *m) {
+            return Some(max.to_string());
+        }
+    }
+    if value_ok(f, &f.default_value) {
+        return Some(f.default_value.clone());
+    }
+    f.choices.first().cloned().filter(|_| f.value_type == ValueType::Choice)
+}
+
+pub struct Fixed {
+    /// What was changed, in plain words, for the confirmation prompt.
+    pub changes: Vec<String>,
+    pub output: Output,
+}
+
+/// Repair every setting that `build` would reject and report what changed.
+pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
+    let mut cx = Ctx { issues: Vec::new() };
+    let mut st = resolve(cfg, pairs, &mut cx);
+    let target = target_of(cfg, &st);
+    let mut changes: Vec<String> = Vec::new();
+    if !cx.issues.is_empty() {
+        changes.push(format!("System set to {}.", target.name));
+    }
+    let shown = |v: &str| if v.is_empty() { "(empty)".to_string() } else { v.to_string() };
+
+    for f in &cfg.flags {
+        let Some(value) = st.flags.get(f.key()).cloned() else { continue };
+        if value_ok(f, &value) {
+            continue;
+        }
+        match nearest_value(f, &value) {
+            Some(new) => {
+                changes.push(format!("{} changed from {} to {new}.", f.name, shown(&value)));
+                st.flags.insert(f.key().to_string(), new);
+            }
+            None if !f.required => {
+                changes.push(format!("{} switched off: {} is not a usable value.", f.name, shown(&value)));
+                st.flags.remove(f.key());
+            }
+            None => {}
+        }
+    }
+    // Clashes first, then anything left without the flag it depends on.
+    let on = |st: &State, name: &str| st.flags.contains_key(name.trim_start_matches('-'));
+    for f in cfg.flags.iter().filter(|f| !f.required) {
+        if on(&st, &f.name) {
+            if let Some(other) = f.exclusions.iter().find(|x| on(&st, x)) {
+                changes.push(format!("{} switched off: it cannot be combined with {other}.", f.name));
+                st.flags.remove(f.key());
+            }
+        }
+    }
+    while let Some(f) = cfg.flags.iter().find(|f| {
+        !f.required && on(&st, &f.name) && !f.dependencies.is_empty() && !f.dependencies.iter().any(|d| on(&st, d))
+    }) {
+        changes.push(format!("{} switched off: it needs {}.", f.name, f.dependencies.join(" or ")));
+        st.flags.remove(f.key());
+    }
+
+    fn drop_invalid(list: &mut Vec<String>, what: &str, ok: fn(&str) -> bool, changes: &mut Vec<String>) {
+        list.retain(|item| {
+            let keep = ok(item);
+            if !keep {
+                changes.push(format!("{what} {item:?} removed."));
+            }
+            keep
+        });
+    }
+    if st.iface_mode == "named" {
+        drop_invalid(&mut st.ifaces, "Interface", valid_iface, &mut changes);
+        if st.ifaces.is_empty() {
+            st.ifaces.push(target.default_interface.clone());
+            changes.push(format!("Interface set to {}.", target.default_interface));
+        }
+    }
+    drop_invalid(&mut st.hosts, "Host", valid_host, &mut changes);
+    drop_invalid(&mut st.nets, "Network", valid_net, &mut changes);
+    drop_invalid(&mut st.ports, "Port", valid_port, &mut changes);
+    if st.scope == "nodes" && !valid_nodes(&st.nodes) {
+        changes.push(format!("Node list {} is not valid; changed to \"This node\".", shown(&st.nodes)));
+        st.scope = "node".into();
+        st.nodes.clear();
+    }
+    if !st.subdir.is_empty() && !valid_subdir(&st.subdir) {
+        changes.push(format!("Subfolder {:?} removed.", st.subdir));
+        st.subdir.clear();
+    }
+    if !st.proto.is_empty() && !cfg.filter.protocols.iter().any(|p| p == &st.proto) {
+        changes.push(format!("Protocol {:?} removed.", st.proto));
+        st.proto.clear();
+    }
+    let mut probe = Ctx { issues: Vec::new() };
+    check_raw_filter(st.raw.trim(), &mut probe);
+    if !probe.issues.is_empty() {
+        changes.push(format!("Extra filter expression {:?} removed.", st.raw));
+        st.raw.clear();
+    }
+
+    Fixed { changes, output: write_command(cfg, st, Ctx { issues: Vec::new() }) }
+}
+
 pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
+    let mut cx = Ctx { issues: Vec::new() };
+    let st = resolve(cfg, pairs, &mut cx);
+    write_command(cfg, st, cx)
+}
+
+/// Query string to form state, filling in defaults. Nothing is validated here
+/// except the target id, which has to exist to pick the defaults.
+fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
     let q: HashMap<&str, &str> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let explicit = q.contains_key("v");
-    let mut cx = Ctx { issues: Vec::new() };
     let get = |k: &str| q.get(k).copied().unwrap_or("");
     let flag_on = |k: &str, default: bool| q.get(k).map_or(default, |v| *v == "1");
 
@@ -293,7 +444,7 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
         ifaces.push(target.default_interface.clone());
     }
 
-    let st = State {
+    State {
         target: target.id.clone(),
         scope: scope.into(),
         nodes: get("n").trim().to_string(),
@@ -310,14 +461,25 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
         nets: split_list(get("net")),
         proto: get("pr").to_string(),
         raw: get("q").to_string(),
-    };
+    }
+}
+
+fn target_of<'a>(cfg: &'a Config, st: &State) -> &'a Target {
+    cfg.targets.iter().find(|t| t.id == st.target).unwrap_or(&cfg.targets[0])
+}
+
+/// Validate the state and write the command.
+fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
+    let target = target_of(cfg, &st);
+    let scope = st.scope.clone();
+    let scope = scope.as_str();
 
     // Interfaces: a literal name, or a shell loop over several.
     let loop_list: Option<String> = if st.iface_mode == "all" {
         target.all_interfaces.clone().filter(|_| target.any_interface.is_none())
     } else {
         for i in &st.ifaces {
-            if !all_chars(i, "_.:-") {
+            if !valid_iface(i) {
                 cx.error("ifaces", format!("{i:?} is not a valid interface name."));
             }
         }
@@ -346,7 +508,7 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
     // Output file, log and backgrounding only apply when writing to disk.
     let mut dir = target.output_dir.clone();
     if !st.subdir.is_empty() {
-        if !all_chars(&st.subdir, "_./-") || st.subdir.split('/').any(|p| p == ".." || p.is_empty()) {
+        if !valid_subdir(&st.subdir) {
             cx.error("subdir", "The subfolder may only contain letters, digits and _ . - /");
         }
         dir = format!("{dir}/{}", st.subdir);
@@ -400,7 +562,7 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
             _ => inner.to_string(),
         }
     };
-    if scope == "nodes" && !(all_chars(&st.nodes, ",-") && st.nodes.starts_with(|c: char| c.is_ascii_digit())) {
+    if scope == "nodes" && !valid_nodes(&st.nodes) {
         cx.error("nodes", "List the node numbers, e.g. 1,2,5 or 1-4.");
     }
     cmd = wrap(&cmd, &mut cx);
@@ -517,6 +679,52 @@ mod tests {
             assert!(o.command.is_empty(), "{q} must not yield a command");
             assert!(o.stop_command.is_none());
         }
+    }
+
+    #[test]
+    fn fix_moves_values_to_the_nearest_valid_one() {
+        let f = fix(&cfg(), &parse_query("v=1&t=powerscale&f.s=99999999&f.C=0&f.B=abc&f.W=4"));
+        assert!(errors(&f.output).is_empty(), "{:?}", f.output.issues);
+        let flags = &f.output.state.flags;
+        assert_eq!((flags["s"].as_str(), flags["C"].as_str(), flags["B"].as_str()), ("262144", "1", "4096"));
+        assert_eq!(f.changes.len(), 3, "{:?}", f.changes);
+        assert!(f.changes[0].contains("-s changed from 99999999 to 262144"));
+    }
+
+    #[test]
+    fn fix_switches_off_clashing_and_orphaned_flags() {
+        let f = fix(&cfg(), &parse_query("v=1&f.C=500&f.G=60&f.W=5"));
+        let flags = &f.output.state.flags;
+        assert!(flags.contains_key("C") && flags.contains_key("W") && !flags.contains_key("G"));
+        let f = fix(&cfg(), &parse_query("v=1&f.W=5"));
+        assert!(!f.output.state.flags.contains_key("W"));
+        assert!(f.changes[0].contains("-W switched off"));
+        assert!(errors(&f.output).is_empty());
+    }
+
+    #[test]
+    fn fix_clears_everything_the_injection_test_rejects() {
+        for q in [
+            "if=eth0;reboot,lagg0", "if=$(reboot)", "sd=../../etc", "sc=nodes&n=1;reboot", "h=1.1.1.1;reboot,10.0.0.1",
+            "p=53;reboot,445", "net=10.0.0.0/8`id`", "q=port 53; reboot", "q=!tcp", "pr=tcp;id", "v=1&f.s=1;id",
+            "v=1&t=linux&f.Z=root;id", "t=nope",
+        ] {
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty(), "{q}: {:?}", f.output.issues);
+            assert!(!f.changes.is_empty(), "{q}");
+            assert!(!f.output.command.is_empty() && !f.output.command.contains("reboot") && !f.output.command.contains(";id"), "{q}");
+        }
+        let f = fix(&cfg(), &parse_query("if=eth0;reboot,lagg0&h=1.1.1.1;reboot,10.0.0.1"));
+        assert_eq!(f.output.state.ifaces, ["lagg0"]);
+        assert_eq!(f.output.state.hosts, ["10.0.0.1"]);
+    }
+
+    #[test]
+    fn fix_leaves_a_valid_setup_alone() {
+        let q = "v=1&t=powerscale&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=3600&f.W=4&h=192.168.1.1";
+        let f = fix(&cfg(), &parse_query(q));
+        assert!(f.changes.is_empty());
+        assert_eq!(f.output.command, run(q).command);
     }
 
     #[test]

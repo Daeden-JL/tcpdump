@@ -114,6 +114,14 @@ async fn api_build(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> im
     no_cache(Json(builder::build(&app.config(), &pairs)))
 }
 
+/// Repair invalid settings. Nothing is applied here: the page shows the
+/// list of changes and only adopts the result once the user confirms.
+async fn api_fix(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> impl IntoResponse {
+    let pairs = builder::parse_query(query.as_deref().unwrap_or(""));
+    let fixed = builder::fix(&app.config(), &pairs);
+    no_cache(Json(json!({ "changes": fixed.changes, "output": fixed.output })))
+}
+
 /// Read an edited command back into builder state. `t` is the system the
 /// page currently has selected, used only to break ties.
 async fn api_parse(State(app): State<Arc<App>>, RawQuery(query): RawQuery, body: String) -> impl IntoResponse {
@@ -243,6 +251,7 @@ async fn main() {
         .route("/theme.css", get(api_theme))
         .route("/api/build", get(api_build))
         .route("/api/parse", post(api_parse))
+        .route("/api/fix", get(api_fix))
         .route("/api/events", get(api_events))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app.clone());

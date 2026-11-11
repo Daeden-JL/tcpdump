@@ -45,6 +45,7 @@
     <p id="command-hint" class="note">You can edit or paste a command here, then choose Parse to update the settings to match.</p>
     <ul id="parse-notes" hidden></ul>
     <ul id="issues"></ul>
+    <button type="button" id="fix" hidden>Fix problems…</button>
     <div id="stop" hidden>
       <div class="result-head">
         <h3>To stop the capture</h3>
@@ -69,6 +70,15 @@
   <p>Check interface names, paths and free disk space before running a capture.</p>
   <p id="links" class="links" hidden></p>
 </footer>
+<dialog id="fix-dialog" aria-labelledby="fix-title">
+  <h2 id="fix-title">Apply these fixes?</h2>
+  <p id="fix-intro" class="note"></p>
+  <ul id="fix-changes"></ul>
+  <div class="actions">
+    <button type="button" id="fix-apply" class="primary">Apply fixes</button>
+    <button type="button" id="fix-cancel">Cancel</button>
+  </div>
+</dialog>
 <script src="static/{{v}}/app.js"></script>
 </body>
 </html>

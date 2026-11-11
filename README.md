@@ -94,6 +94,20 @@ Anything the builder has no setting for (an unknown option, a folder outside
 the configured one, a `<placeholder>`) is listed under the box and left out,
 and the box then shows the builder's own version of the command.
 
+## Invalid values
+
+A setting with a problem is outlined in the form with the message beside it,
+and the same problems are listed under the command. This applies whether the
+value was typed, parsed from a command or came from a shared link.
+
+**Fix problems…** shows what it would change and applies it only after you
+confirm:
+
+- a number out of range moves to the nearest limit;
+- a value that is not a number, or not an allowed choice, goes to the flag's default;
+- a flag that clashes with another, or lacks the flag it depends on, is switched off;
+- invalid interfaces, hosts, networks, ports, subfolders and filter text are removed.
+
 ## Safety
 
 Generated commands are pasted into root shells, and links can come from
@@ -108,6 +122,7 @@ trusted as written.
 | --- | --- |
 | `GET /api/build?<query>` | JSON: `command`, `stop_command`, `issues`, resolved `state` |
 | `POST /api/parse?t=<target>` | Body is command text. JSON: `found`, `notes`, and `output` in the same form as `/api/build` |
+| `GET /api/fix?<query>` | JSON: `changes` (what would be repaired) and `output` for the repaired settings |
 | `GET /theme.css` | The colours from `[theme]` as CSS variables |
 | `GET /api/config` | The current config with example commands filled in |
 | `GET /api/events` | Server-sent event on each config reload |
