@@ -1,34 +1,6 @@
+/* Colours come from /theme.css, which the server builds from [theme] in the config. */
 :root {
-  --bg: #f4f6f5;
-  --panel: #ffffff;
-  --ink: #17211d;
-  --muted: #5a6964;
-  --line: #d5dcd9;
-  --accent: #0b6e4f;
-  --accent-ink: #ffffff;
-  --soft: #e4f1ec;
-  --code-bg: #10201a;
-  --code-ink: #d6f5e6;
-  --error: #a4262c;
-  --warn: #8a5a00;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  color-scheme: light dark;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0e1513;
-    --panel: #16201c;
-    --ink: #e3ece8;
-    --muted: #96a8a1;
-    --line: #2b3a35;
-    --accent: #4fd1a1;
-    --accent-ink: #06231a;
-    --soft: #1d3029;
-    --code-bg: #0a100e;
-    --code-ink: #c9f2df;
-    --error: #ff8f8f;
-    --warn: #f0c060;
-  }
 }
 
 * { box-sizing: border-box; }
@@ -155,7 +127,25 @@ pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-pre.empty { color: var(--muted); font-family: inherit; }
+textarea#command {
+  display: block;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font: 0.86rem/1.55 var(--mono);
+  overflow-wrap: anywhere;
+  resize: none;
+  overflow: hidden;
+}
+textarea#command::placeholder { color: var(--muted); font-family: system-ui, sans-serif; }
+textarea#command.edited { border-color: var(--accent); }
+.result-head .buttons { display: flex; gap: 8px; }
+#parse-notes { list-style: none; margin: 0 0 10px; padding: 0; font-size: 0.9rem; color: var(--muted); }
+#parse-notes li { padding: 3px 0 3px 10px; border-left: 3px solid var(--line); margin-bottom: 4px; }
 button {
   padding: 6px 14px;
   border: 1px solid var(--line);

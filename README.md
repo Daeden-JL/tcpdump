@@ -50,6 +50,7 @@ front, do not configure it to cache HTML.
 | Section | Purpose |
 | --- | --- |
 | `[site]` | `url` is the public address used for share links. Change it to host the app anywhere; leave it empty to use the address the visitor is on. `[site.repo]` and `[site.license]` are footer links; set `enabled = false` to hide one. |
+| `[theme]` | `mode` (`auto`, `light` or `dark`) and the hex colours for `[theme.light]` and `[theme.dark]`. Any colour left out keeps its default. |
 | `[[targets]]` | A system: tcpdump command, output folder, file and log name templates, interface defaults, and the optional `[targets.cluster]` wrappers. |
 | `[[flags]]` | A tcpdump option: type, default, limits, `dependencies`, `exclusions`, a one-line `description`, a longer `explanation`, and `[[flags.recommendations]]`. |
 | `[filter]` | Protocol list and one-click filter snippets. |
@@ -85,6 +86,14 @@ stays live and the page shows the error.
 To add an example, set the builder up the way you want and copy everything
 after the `?` in the address bar into `query`.
 
+## Editing the command
+
+The command box is editable. Change it, or paste a command from elsewhere,
+and a **Parse** button appears; it reads the text back into the settings.
+Anything the builder has no setting for (an unknown option, a folder outside
+the configured one, a `<placeholder>`) is listed under the box and left out,
+and the box then shows the builder's own version of the command.
+
 ## Safety
 
 Generated commands are pasted into root shells, and links can come from
@@ -98,6 +107,8 @@ trusted as written.
 | Path | Returns |
 | --- | --- |
 | `GET /api/build?<query>` | JSON: `command`, `stop_command`, `issues`, resolved `state` |
+| `POST /api/parse?t=<target>` | Body is command text. JSON: `found`, `notes`, and `output` in the same form as `/api/build` |
+| `GET /theme.css` | The colours from `[theme]` as CSS variables |
 | `GET /api/config` | The current config with example commands filled in |
 | `GET /api/events` | Server-sent event on each config reload |
 | `GET /healthz` | `ok` |
@@ -108,6 +119,7 @@ trusted as written.
 cargo test
 ```
 
-Command generation and validation live in `src/builder.rs`, the config schema
+Command generation and validation live in `src/builder.rs`, reading a command
+back in `src/parse.rs`, the config schema
 in `src/config.rs`, the server and file watcher in `src/main.rs`, and the page
 in `assets/`.

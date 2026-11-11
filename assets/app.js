@@ -224,15 +224,59 @@ function renderForm() {
 
 // ---- output ---------------------------------------------------------------
 
-function showOutput(out) {
-  const pre = $("#command");
-  pre.textContent = out.command || "Fix the problems below to get a command.";
-  pre.classList.toggle("empty", !out.command);
-  $("#copy-command").disabled = !out.command;
+let generated = ""; // the command as the builder last wrote it
+
+function fitCommand() {
+  const box = $("#command");
+  box.style.height = "auto";
+  box.style.height = `${box.scrollHeight + 2}px`;
+}
+
+// Parse and Undo appear only while the box differs from the builder's command.
+function markEdited() {
+  const box = $("#command");
+  const edited = box.value !== generated;
+  box.classList.toggle("edited", edited);
+  $("#parse").hidden = !edited || !box.value.trim();
+  $("#revert").hidden = !edited;
+  $("#copy-command").disabled = !box.value.trim();
+  fitCommand();
+}
+
+function showNotes(notes) {
+  $("#parse-notes").hidden = !notes.length;
+  $("#parse-notes").replaceChildren(...notes.map((n) => el("li", { text: n })));
+}
+
+function showOutput(out, keepText) {
+  generated = out.command;
+  if (!keepText) $("#command").value = out.command;
+  markEdited();
   $("#issues").replaceChildren(...out.issues.map((i) => el("li", { class: i.level, text: i.message })));
   $("#stop").hidden = !out.stop_command;
   $("#stop-command").textContent = out.stop_command || "";
   $("#stop-note").hidden = !out.command || !!out.stop_command;
+}
+
+// Send the edited text to the server, which reads it back into settings.
+async function parseCommand() {
+  const text = $("#command").value;
+  const seq = ++buildSeq;
+  const res = await fetch(`api/parse?t=${enc(state.target)}`, { method: "POST", body: text });
+  if (!res.ok) throw new Error(`api/parse: ${res.status}`);
+  const result = await res.json();
+  if (seq !== buildSeq) return;
+  if (!result.found) {
+    showNotes(["No tcpdump command was found in that text, so nothing was changed."]);
+    return;
+  }
+  flagValues = {};
+  adopt(result.output.state);
+  renderForm();
+  // If the parsed settings do not build, keep the text so it can be corrected.
+  showOutput(result.output, !result.output.command);
+  showNotes(result.notes);
+  history.replaceState(null, "", `?${serialise()}`);
 }
 
 async function refresh() {
@@ -241,7 +285,10 @@ async function refresh() {
   const seq = ++buildSeq;
   try {
     const out = await getJSON(`api/build?${query}`);
-    if (seq === buildSeq) showOutput(out);
+    if (seq === buildSeq) {
+      showOutput(out);
+      showNotes([]);
+    }
   } catch (e) {
     console.error(e);
   }
@@ -255,6 +302,7 @@ async function load(query, updateUrl) {
   adopt(out.state);
   renderForm();
   showOutput(out);
+  showNotes([]);
   if (updateUrl) history.replaceState(null, "", `?${serialise()}`);
 }
 
@@ -315,7 +363,18 @@ function shareLink() {
 }
 
 async function main() {
-  $("#copy-command").addEventListener("click", (e) => copy($("#command").textContent, e.currentTarget));
+  $("#copy-command").addEventListener("click", (e) => copy($("#command").value, e.currentTarget));
+  $("#command").addEventListener("input", markEdited);
+  $("#command").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !$("#parse").hidden) parseCommand().catch(console.error);
+  });
+  $("#parse").addEventListener("click", () => parseCommand().catch(console.error));
+  $("#revert").addEventListener("click", () => {
+    $("#command").value = generated;
+    markEdited();
+    showNotes([]);
+  });
+  window.addEventListener("resize", fitCommand);
   $("#copy-stop").addEventListener("click", (e) => copy($("#stop-command").textContent, e.currentTarget));
   $("#copy-link").addEventListener("click", (e) => copy(shareLink(), e.currentTarget));
   $("#reset").addEventListener("click", async () => {
@@ -335,6 +394,7 @@ async function main() {
   events.addEventListener("config", async (e) => {
     if (Number(e.data) === seen) return;
     seen = Number(e.data);
+    $("#theme").href = `theme.css?g=${seen}`;
     await loadConfig();
     await load(serialise(), location.search !== "");
   });
@@ -342,5 +402,5 @@ async function main() {
 
 main().catch((e) => {
   console.error(e);
-  $("#command").textContent = "The builder could not be loaded. Reload the page to try again.";
+  $("#command").placeholder = "The builder could not be loaded. Reload the page to try again.";
 });

@@ -1,7 +1,7 @@
 //! The TOML configuration: schema, loading and validation.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -10,6 +10,8 @@ pub struct Config {
     pub version: String,
     #[serde(default)]
     pub site: Site,
+    #[serde(default)]
+    pub theme: Theme,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub flags: Vec<Flag>,
@@ -17,6 +19,85 @@ pub struct Config {
     pub filter: FilterConfig,
     #[serde(default)]
     pub examples: Vec<Example>,
+}
+
+/// Colours. `light` and `dark` override individual entries of [`PALETTE`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Theme {
+    #[serde(default)]
+    pub mode: ThemeMode,
+    #[serde(default)]
+    pub light: BTreeMap<String, String>,
+    #[serde(default)]
+    pub dark: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Follow the visitor's system setting.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+/// Every colour the page uses: (name in the TOML, light default, dark default).
+pub const PALETTE: &[(&str, &str, &str)] = &[
+    ("bg", "#f4f6f5", "#0e1513"),
+    ("panel", "#ffffff", "#16201c"),
+    ("ink", "#17211d", "#e3ece8"),
+    ("muted", "#5a6964", "#96a8a1"),
+    ("line", "#d5dcd9", "#2b3a35"),
+    ("accent", "#0b6e4f", "#4fd1a1"),
+    ("accent_ink", "#ffffff", "#06231a"),
+    ("soft", "#e4f1ec", "#1d3029"),
+    ("code_bg", "#10201a", "#0a100e"),
+    ("code_ink", "#d6f5e6", "#c9f2df"),
+    ("error", "#a4262c", "#ff8f8f"),
+    ("warn", "#8a5a00", "#f0c060"),
+];
+
+impl Theme {
+    fn block(&self, dark: bool) -> String {
+        let overrides = if dark { &self.dark } else { &self.light };
+        PALETTE
+            .iter()
+            .map(|(key, light, dark_default)| {
+                let value = overrides.get(*key).map_or(if dark { *dark_default } else { *light }, String::as_str);
+                format!("--{}:{value};", key.replace('_', "-"))
+            })
+            .collect()
+    }
+
+    /// The stylesheet served at `/theme.css`.
+    pub fn css(&self) -> String {
+        let (light, dark) = (self.block(false), self.block(true));
+        match self.mode {
+            ThemeMode::Light => format!(":root{{color-scheme:light;{light}}}\n"),
+            ThemeMode::Dark => format!(":root{{color-scheme:dark;{dark}}}\n"),
+            ThemeMode::Auto => format!(
+                ":root{{color-scheme:light dark;{light}}}\n@media (prefers-color-scheme:dark){{:root{{{dark}}}}}\n"
+            ),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for (mode, colours) in [("light", &self.light), ("dark", &self.dark)] {
+            for (key, value) in colours {
+                if !PALETTE.iter().any(|p| p.0 == key) {
+                    let known: Vec<&str> = PALETTE.iter().map(|p| p.0).collect();
+                    return Err(format!("theme.{mode}.{key} is not a colour name; use one of: {}", known.join(", ")));
+                }
+                let hex = value.strip_prefix('#').unwrap_or("");
+                if !matches!(hex.len(), 3 | 4 | 6 | 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("theme.{mode}.{key} must be a hex colour such as #0b6e4f, not {value:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -285,6 +366,7 @@ impl Config {
                 return Err(format!("{name}.url must start with https:// or http:// while the link is enabled"));
             }
         }
+        self.theme.validate()?;
         let mut ids = HashSet::new();
         for t in &self.targets {
             if t.id.is_empty() || !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -356,5 +438,30 @@ mod tests {
     fn enabled_footer_links_need_a_web_address() {
         let bad = SHIPPED.replacen("url = \"https://github.com/Daeden-JL/tcpdump\"", "url = \"javascript:alert(1)\"", 1);
         assert!(Config::parse(&bad).unwrap_err().contains("site.repo.url"));
+    }
+
+    #[test]
+    fn theme_modes_and_overrides() {
+        let cfg = Config::parse(SHIPPED).unwrap();
+        let css = cfg.theme.css();
+        assert!(css.contains("color-scheme:light dark") && css.contains("prefers-color-scheme:dark"));
+        assert!(css.contains("--accent-ink:#ffffff;") && css.contains("--bg:#0e1513;"));
+
+        let forced = SHIPPED.replacen("mode = \"auto\"", "mode = \"dark\"", 1).replacen("accent = \"#4fd1a1\"", "accent = \"#ff00aa\"", 1);
+        let css = Config::parse(&forced).unwrap().theme.css();
+        assert!(css.starts_with(":root{color-scheme:dark;") && !css.contains("@media"));
+        assert!(css.contains("--accent:#ff00aa;") && !css.contains("#f4f6f5"));
+
+        let minimal = "version = \"1\"\n[theme.light]\naccent = \"#123\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
+        let css = Config::parse(minimal).unwrap().theme.css();
+        assert!(css.contains("--accent:#123;") && css.contains("--panel:#ffffff;"));
+    }
+
+    #[test]
+    fn theme_rejects_unknown_names_and_unsafe_values() {
+        let head = "version = \"1\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
+        for bad in ["[theme.light]\nbackground = \"#fff\"", "[theme.dark]\nbg = \"red;} body{display:none\"", "[theme]\nmode = \"neon\""] {
+            assert!(Config::parse(&format!("{head}{bad}\n")).is_err(), "{bad}");
+        }
     }
 }

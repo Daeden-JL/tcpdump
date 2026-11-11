@@ -28,6 +28,49 @@ url = "https://github.com/Daeden-JL/tcpdump/blob/main/LICENSE"
 label = "MIT License"
 
 # ---------------------------------------------------------------------------
+# Theme. `mode` is "auto" (follow the visitor's system setting), "light" or
+# "dark". Colours are hex values; delete any line to fall back to the default.
+#
+#   bg / panel          page background / cards and the navigation panel
+#   ink / muted / line  main text / secondary text / borders
+#   accent / accent_ink buttons, links and flag names / text on accent buttons
+#   soft                highlighted chips and the recommendation note
+#   code_bg / code_ink  command boxes
+#   error / warn        problem messages
+# ---------------------------------------------------------------------------
+
+[theme]
+mode = "auto"
+
+[theme.light]
+bg = "#f4f6f5"
+panel = "#ffffff"
+ink = "#17211d"
+muted = "#5a6964"
+line = "#d5dcd9"
+accent = "#0b6e4f"
+accent_ink = "#ffffff"
+soft = "#e4f1ec"
+code_bg = "#10201a"
+code_ink = "#d6f5e6"
+error = "#a4262c"
+warn = "#8a5a00"
+
+[theme.dark]
+bg = "#0e1513"
+panel = "#16201c"
+ink = "#e3ece8"
+muted = "#96a8a1"
+line = "#2b3a35"
+accent = "#4fd1a1"
+accent_ink = "#06231a"
+soft = "#1d3029"
+code_bg = "#0a100e"
+code_ink = "#c9f2df"
+error = "#ff8f8f"
+warn = "#f0c060"
+
+# ---------------------------------------------------------------------------
 # Targets: the systems a command can be generated for.
 #
 # Templates may use these placeholders:

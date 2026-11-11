@@ -7,6 +7,7 @@
 <meta name="description" content="Build, adjust and share tcpdump commands for PowerScale and Linux.">
 <link rel="icon" href="static/{{v}}/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="static/{{v}}/style.css">
+<link rel="stylesheet" href="theme.css" id="theme">
 </head>
 <body>
 <p id="config-error" class="banner" role="alert" hidden></p>
@@ -31,9 +32,18 @@
   <aside id="result" aria-live="polite">
     <div class="result-head">
       <h2>Command</h2>
-      <button type="button" id="copy-command" class="primary">Copy</button>
+      <div class="buttons">
+        <button type="button" id="parse" hidden>Parse</button>
+        <button type="button" id="revert" hidden>Undo edit</button>
+        <button type="button" id="copy-command" class="primary">Copy</button>
+      </div>
     </div>
-    <pre id="command" tabindex="0"></pre>
+    <textarea id="command" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off"
+      aria-label="Command. Edit it, then choose Parse to update the settings."
+      aria-describedby="command-hint"
+      placeholder="Fix the problems below to get a command, or paste one here and choose Parse."></textarea>
+    <p id="command-hint" class="note">You can edit or paste a command here, then choose Parse to update the settings to match.</p>
+    <ul id="parse-notes" hidden></ul>
     <ul id="issues"></ul>
     <div id="stop" hidden>
       <div class="result-head">
