@@ -5,7 +5,7 @@
 //! value is therefore checked against a conservative character set, and no
 //! command is produced at all while any error is outstanding.
 
-use crate::config::{Config, Flag, Target, ValueType};
+use crate::config::{Config, Flag, Role, Target, ValueType};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 
@@ -36,6 +36,33 @@ pub struct State {
     pub nets: Vec<String>,
     pub proto: String,
     pub raw: String,
+    /// Scheduling with `at`. Start mode is "now", "time", "date" or "delay";
+    /// stop mode is "none" or one of the last three. The value is HH:MM,
+    /// YYYY-MM-DDTHH:MM or a number, and the unit applies to a delay.
+    pub at_start: String,
+    pub at_start_value: String,
+    pub at_start_unit: String,
+    pub at_stop: String,
+    pub at_stop_value: String,
+    pub at_stop_unit: String,
+    /// Estimate inputs: counts the command cannot tell us, link speed in
+    /// Gbit/s, and free space in GB. They never change the command.
+    pub est_nodes: String,
+    pub est_ifaces: String,
+    pub link_speed: String,
+    pub free_space: String,
+}
+
+/// The capture size estimate, already worded for display.
+#[derive(Debug, Serialize)]
+pub struct Estimate {
+    /// "none" (nothing written), "exact", "worst" or "unbounded".
+    pub kind: &'static str,
+    pub headline: String,
+    pub lines: Vec<String>,
+    pub need_nodes: bool,
+    pub need_ifaces: bool,
+    pub need_link: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +70,7 @@ pub struct Output {
     pub command: String,
     pub stop_command: Option<String>,
     pub issues: Vec<Issue>,
+    pub estimate: Option<Estimate>,
     pub state: State,
 }
 
@@ -128,6 +156,26 @@ fn valid_port(p: &str) -> bool {
     }
 }
 
+fn valid_iface(s: &str) -> bool {
+    all_chars(s, "_.:-")
+}
+
+fn valid_host(s: &str) -> bool {
+    all_chars(s, ".:-")
+}
+
+fn valid_net(s: &str) -> bool {
+    all_chars(s, ".:/") && s.starts_with(|c: char| c.is_ascii_hexdigit())
+}
+
+fn valid_subdir(s: &str) -> bool {
+    all_chars(s, "_./-") && !s.split('/').any(|p| p == ".." || p.is_empty())
+}
+
+fn valid_nodes(s: &str) -> bool {
+    all_chars(s, ",-") && s.starts_with(|c: char| c.is_ascii_digit())
+}
+
 /// Wrap in double quotes when the shell would otherwise interpret something.
 fn shell_word(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || " ./:_-".contains(c)) {
@@ -166,13 +214,13 @@ fn build_filter(cfg: &Config, st: &State, cx: &mut Ctx) -> String {
 
     let mut addrs = Vec::new();
     for h in &st.hosts {
-        if !all_chars(h, ".:-") {
+        if !valid_host(h) {
             cx.error("hosts", format!("{h:?} is not a valid host name or IP address."));
         }
         addrs.push(format!("host {h}"));
     }
     for n in &st.nets {
-        if !all_chars(n, ".:/") || !n.starts_with(|c: char| c.is_ascii_hexdigit()) {
+        if !valid_net(n) {
             cx.error("nets", format!("{n:?} is not a valid network, e.g. 172.26.0.0/16."));
         }
         addrs.push(format!("net {n}"));
@@ -267,10 +315,165 @@ fn check_flag(f: &Flag, value: &str, enabled: &dyn Fn(&str) -> bool, cx: &mut Ct
     }
 }
 
+/// Whether `value` is acceptable for the flag on its own (ignoring other flags).
+fn value_ok(f: &Flag, value: &str) -> bool {
+    match f.value_type {
+        ValueType::Bool => true,
+        ValueType::Integer => value.parse::<i64>().is_ok_and(|n| {
+            let v = f.validation.as_ref();
+            !v.and_then(|v| v.min).is_some_and(|m| n < m) && !v.and_then(|v| v.max).is_some_and(|m| n > m)
+        }),
+        ValueType::Choice => f.choices.iter().any(|c| c == value),
+        ValueType::String => all_chars(value, "_./:=,+@%-"),
+    }
+}
+
+/// The closest acceptable value: the nearer limit for a number out of range
+/// (or the flag's `over_max` when it is too large), otherwise the default. `None` when there is nothing usable.
+fn nearest_value(f: &Flag, value: &str) -> Option<String> {
+    if let (ValueType::Integer, Ok(n)) = (f.value_type, value.parse::<i64>()) {
+        let v = f.validation.as_ref();
+        if let Some(min) = v.and_then(|v| v.min).filter(|m| n < *m) {
+            return Some(min.to_string());
+        }
+        if let Some(max) = v.and_then(|v| v.max).filter(|m| n > *m) {
+            return Some(v.and_then(|v| v.over_max).unwrap_or(max).to_string());
+        }
+    }
+    if value_ok(f, &f.default_value) {
+        return Some(f.default_value.clone());
+    }
+    f.choices.first().cloned().filter(|_| f.value_type == ValueType::Choice)
+}
+
+pub struct Fixed {
+    /// What was changed, in plain words, for the confirmation prompt.
+    pub changes: Vec<String>,
+    pub output: Output,
+}
+
+/// Repair every setting that `build` would reject and report what changed.
+pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
+    let mut cx = Ctx { issues: Vec::new() };
+    let mut st = resolve(cfg, pairs, &mut cx);
+    let target = target_of(cfg, &st);
+    let mut changes: Vec<String> = Vec::new();
+    if !cx.issues.is_empty() {
+        changes.push(format!("System set to {}.", target.name));
+    }
+    let shown = |v: &str| if v.is_empty() { "(empty)".to_string() } else { v.to_string() };
+
+    for f in &cfg.flags {
+        let Some(value) = st.flags.get(f.key()).cloned() else { continue };
+        if value_ok(f, &value) {
+            continue;
+        }
+        match nearest_value(f, &value) {
+            Some(new) => {
+                changes.push(format!("{} changed from {} to {new}.", f.name, shown(&value)));
+                st.flags.insert(f.key().to_string(), new);
+            }
+            None if !f.required => {
+                changes.push(format!("{} switched off: {} is not a usable value.", f.name, shown(&value)));
+                st.flags.remove(f.key());
+            }
+            None => {}
+        }
+    }
+    // Clashes first, then anything left without the flag it depends on.
+    let on = |st: &State, name: &str| st.flags.contains_key(name.trim_start_matches('-'));
+    for f in cfg.flags.iter().filter(|f| !f.required) {
+        if on(&st, &f.name) {
+            if let Some(other) = f.exclusions.iter().find(|x| on(&st, x)) {
+                changes.push(format!("{} switched off: it cannot be combined with {other}.", f.name));
+                st.flags.remove(f.key());
+            }
+        }
+    }
+    while let Some(f) = cfg.flags.iter().find(|f| {
+        !f.required && on(&st, &f.name) && !f.dependencies.is_empty() && !f.dependencies.iter().any(|d| on(&st, d))
+    }) {
+        changes.push(format!("{} switched off: it needs {}.", f.name, f.dependencies.join(" or ")));
+        st.flags.remove(f.key());
+    }
+
+    fn drop_invalid(list: &mut Vec<String>, what: &str, ok: fn(&str) -> bool, changes: &mut Vec<String>) {
+        list.retain(|item| {
+            let keep = ok(item);
+            if !keep {
+                changes.push(format!("{what} {item:?} removed."));
+            }
+            keep
+        });
+    }
+    if st.iface_mode == "named" {
+        drop_invalid(&mut st.ifaces, "Interface", valid_iface, &mut changes);
+        if st.ifaces.is_empty() {
+            st.ifaces.push(target.default_interface.clone());
+            changes.push(format!("Interface set to {}.", target.default_interface));
+        }
+    }
+    drop_invalid(&mut st.hosts, "Host", valid_host, &mut changes);
+    drop_invalid(&mut st.nets, "Network", valid_net, &mut changes);
+    drop_invalid(&mut st.ports, "Port", valid_port, &mut changes);
+    if st.scope == "nodes" && !valid_nodes(&st.nodes) {
+        changes.push(format!("Node list {} is not valid; changed to \"This node\".", shown(&st.nodes)));
+        st.scope = "node".into();
+        st.nodes.clear();
+    }
+    if !st.subdir.is_empty() && !valid_subdir(&st.subdir) {
+        changes.push(format!("Subfolder {:?} removed.", st.subdir));
+        st.subdir.clear();
+    }
+    if !st.proto.is_empty() && !cfg.filter.protocols.iter().any(|p| p == &st.proto) {
+        changes.push(format!("Protocol {:?} removed.", st.proto));
+        st.proto.clear();
+    }
+    if at_spec(&st.at_start, &st.at_start_value, &st.at_start_unit).is_err() {
+        changes.push("The start schedule is not valid; changed to \"Start now\".".into());
+        st.at_start = "now".into();
+        st.at_start_value.clear();
+    }
+    if at_spec(&st.at_stop, &st.at_stop_value, &st.at_stop_unit).is_err() {
+        changes.push("The stop schedule is not valid; changed to \"Stop manually\".".into());
+        st.at_stop = "none".into();
+        st.at_stop_value.clear();
+    }
+    for (value, what) in [(&mut st.est_nodes, "Number of nodes"), (&mut st.est_ifaces, "Number of interfaces")] {
+        if !value.is_empty() && !valid_count(value) {
+            changes.push(format!("{what} for the estimate ({value:?}) cleared."));
+            value.clear();
+        }
+    }
+    if !cfg.estimate.link_speeds_gbit.iter().any(|s| s.to_string() == st.link_speed) {
+        st.link_speed = cfg.estimate.default_link_speed_gbit.to_string();
+        changes.push(format!("Link speed for the estimate set to {} Gbit/s.", st.link_speed));
+    }
+    if !st.free_space.is_empty() && !valid_free_space(&st.free_space) {
+        changes.push(format!("Free space for the estimate ({:?}) cleared.", st.free_space));
+        st.free_space.clear();
+    }
+    let mut probe = Ctx { issues: Vec::new() };
+    check_raw_filter(st.raw.trim(), &mut probe);
+    if !probe.issues.is_empty() {
+        changes.push(format!("Extra filter expression {:?} removed.", st.raw));
+        st.raw.clear();
+    }
+
+    Fixed { changes, output: write_command(cfg, st, Ctx { issues: Vec::new() }) }
+}
+
 pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
+    let mut cx = Ctx { issues: Vec::new() };
+    let st = resolve(cfg, pairs, &mut cx);
+    write_command(cfg, st, cx)
+}
+
+/// Query string to form state, filling in defaults. Nothing is validated here
+/// except the target id, which has to exist to pick the defaults.
+fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
     let q: HashMap<&str, &str> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     let explicit = q.contains_key("v");
-    let mut cx = Ctx { issues: Vec::new() };
     let get = |k: &str| q.get(k).copied().unwrap_or("");
     let flag_on = |k: &str, default: bool| q.get(k).map_or(default, |v| *v == "1");
 
@@ -293,7 +496,7 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
         ifaces.push(target.default_interface.clone());
     }
 
-    let st = State {
+    State {
         target: target.id.clone(),
         scope: scope.into(),
         nodes: get("n").trim().to_string(),
@@ -310,14 +513,274 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
         nets: split_list(get("net")),
         proto: get("pr").to_string(),
         raw: get("q").to_string(),
+        at_start: match get("as") {
+            m @ ("time" | "date" | "delay") => m.to_string(),
+            _ => "now".to_string(),
+        },
+        at_start_value: get("asv").trim().to_string(),
+        at_start_unit: if get("asu").is_empty() { "hours".to_string() } else { get("asu").to_string() },
+        at_stop: match get("ae") {
+            m @ ("time" | "date" | "delay") => m.to_string(),
+            _ => "none".to_string(),
+        },
+        at_stop_value: get("aev").trim().to_string(),
+        at_stop_unit: if get("aeu").is_empty() { "hours".to_string() } else { get("aeu").to_string() },
+        est_nodes: get("en").trim().to_string(),
+        est_ifaces: get("ei").trim().to_string(),
+        link_speed: match get("ls").trim() {
+            "" => cfg.estimate.default_link_speed_gbit.to_string(),
+            given => given.to_string(),
+        },
+        free_space: get("fs").trim().to_string(),
+    }
+}
+
+pub const AT_UNITS: [&str; 3] = ["minutes", "hours", "days"];
+
+fn two_digits(s: &str, max: u32) -> bool {
+    s.len() == 2 && s.parse::<u32>().is_ok_and(|n| n <= max)
+}
+
+/// The time argument for `at`, or why the schedule is not usable.
+/// `Ok(None)` means nothing is scheduled.
+fn at_spec(mode: &str, value: &str, unit: &str) -> Result<Option<String>, String> {
+    match mode {
+        "time" => match value.split_once(':') {
+            Some((h, m)) if two_digits(h, 23) && two_digits(m, 59) => Ok(Some(value.to_string())),
+            _ => Err("Enter the time as HH:MM, for example 01:00.".into()),
+        },
+        "date" => {
+            // YYYY-MM-DDTHH:MM, as a date-and-time input produces it.
+            let b = value.as_bytes();
+            let shaped = b.len() == 16 && b[4] == b'-' && b[7] == b'-' && b[10] == b'T' && b[13] == b':';
+            let digits = |r: std::ops::Range<usize>| value.get(r).filter(|s| s.bytes().all(|c| c.is_ascii_digit()));
+            match (shaped, digits(0..4), digits(5..7), digits(8..10), digits(11..13), digits(14..16)) {
+                (true, Some(y), Some(mo), Some(d), Some(h), Some(mi))
+                    if (1..=12).contains(&mo.parse().unwrap_or(0))
+                        && (1..=31).contains(&d.parse().unwrap_or(0))
+                        && two_digits(h, 23)
+                        && two_digits(mi, 59) =>
+                {
+                    Ok(Some(format!("-t {y}{mo}{d}{h}{mi}")))
+                }
+                _ => Err("Pick a date and a time.".into()),
+            }
+        }
+        "delay" => {
+            if !AT_UNITS.contains(&unit) {
+                return Err("Pick minutes, hours or days.".into());
+            }
+            match value.parse::<u32>() {
+                Ok(n) if (1..=100_000).contains(&n) => Ok(Some(format!("now + {n} {unit}"))),
+                _ => Err("Enter the delay as a whole number of 1 or more.".into()),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn delay_minutes(value: &str, unit: &str) -> Option<u64> {
+    let n: u64 = value.parse().ok()?;
+    Some(n * match unit { "days" => 1440, "hours" => 60, _ => 1 })
+}
+
+fn human_size(bytes: u128) -> String {
+    const UNITS: [(&str, f64); 4] = [("TB", 1e12), ("GB", 1e9), ("MB", 1e6), ("KB", 1e3)];
+    let b = bytes as f64;
+    let (unit, size) = UNITS.iter().find(|u| b >= u.1).unwrap_or(&UNITS[3]);
+    let n = b / size;
+    if n >= 100.0 { format!("{n:.0} {unit}") } else { format!("{n:.1} {unit}") }
+}
+
+fn human_duration(seconds: u128) -> String {
+    let part = |n: u128, unit: &str| format!("{n} {unit}{}", if n == 1 { "" } else { "s" });
+    let (d, h, m, s) = (seconds / 86400, seconds % 86400 / 3600, seconds % 3600 / 60, seconds % 60);
+    let parts: Vec<String> = [(d, "day"), (h, "hour"), (m, "minute"), (s, "second")]
+        .into_iter()
+        .filter(|p| p.0 > 0)
+        .map(|p| part(p.0, p.1))
+        .collect();
+    if parts.is_empty() { "0 seconds".into() } else { parts.join(" ") }
+}
+
+fn plural(n: u128, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+/// How many nodes "1,2,5-8" names.
+fn count_nodes(list: &str) -> u128 {
+    list.split(',')
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.split_once('-').map(|(a, b)| (a.parse::<u128>(), b.parse::<u128>())) {
+            Some((Ok(a), Ok(b))) if b >= a => b - a + 1,
+            _ => 1,
+        })
+        .sum()
+}
+
+const MAX_COUNT: u128 = 100_000;
+
+fn valid_count(s: &str) -> bool {
+    s.parse::<u128>().is_ok_and(|n| (1..=MAX_COUNT).contains(&n))
+}
+
+fn valid_free_space(s: &str) -> bool {
+    s.parse::<f64>().is_ok_and(|n| n.is_finite() && (0.0..=1e9).contains(&n)) && all_chars(s, ".")
+}
+
+fn check_estimate_inputs(cfg: &Config, st: &State, cx: &mut Ctx) {
+    for (field, value, what) in [("est_nodes", &st.est_nodes, "number of nodes"), ("est_ifaces", &st.est_ifaces, "number of interfaces")] {
+        if !value.is_empty() && !valid_count(value) {
+            cx.error(field, format!("The {what} must be a whole number of 1 or more."));
+        }
+    }
+    if !cfg.estimate.link_speeds_gbit.iter().any(|s| s.to_string() == st.link_speed) {
+        cx.error("link_speed", "Pick one of the listed link speeds.");
+    }
+    if !st.free_space.is_empty() && !valid_free_space(&st.free_space) {
+        cx.error("free_space", "Free space must be a number of gigabytes, for example 500.");
+    }
+}
+
+/// Largest frame assumed for packet-count limits (jumbo frame plus headers).
+const MAX_FRAME: u128 = 9018;
+/// A standard full-size Ethernet frame, and what it occupies on the wire.
+const FULL_FRAME: u128 = 1514;
+const PCAP_RECORD: u128 = 16;
+
+/// Upper bound on what the capture writes. `looped_all` is true when the
+/// command loops over every interface, so their number is not in the command.
+fn estimate(cfg: &Config, st: &State, looped_all: bool, cx: &mut Ctx) -> Estimate {
+    if !st.write {
+        return Estimate {
+            kind: "none",
+            headline: "No disk space used".into(),
+            lines: vec!["Packets are printed to the screen, not written to a file.".into()],
+            need_nodes: false,
+            need_ifaces: false,
+            need_link: false,
+        };
+    }
+    let value = |role: Role| -> Option<u128> {
+        let f = cfg.flags.iter().find(|f| f.role == Some(role))?;
+        st.flags.get(f.key())?.parse().ok()
     };
+    let name = |role: Role| cfg.flags.iter().find(|f| f.role == Some(role)).map_or("?", |f| f.name.as_str());
+    let snap = value(Role::SnapLength).filter(|s| *s > 0);
+    let (size_mb, count) = (value(Role::FileSizeMb), value(Role::FileCount));
+    let (seconds, packets) = (value(Role::RotateSeconds), value(Role::PacketCount));
+    let speed: u128 = st.link_speed.parse().unwrap_or(cfg.estimate.default_link_speed_gbit.into());
+
+    // Every limit that applies, as (bytes, kind, explanation); the smallest wins.
+    let mut limits: Vec<(u128, &'static str, Vec<String>)> = Vec::new();
+    if let (Some(mb), Some(n)) = (size_mb, count) {
+        limits.push((
+            mb * 1_000_000 * n,
+            "exact",
+            vec![format!(
+                "{} of {mb} MB per interface ({} × {}). The oldest file is overwritten, so this is a hard limit; the capture runs until it is stopped.",
+                plural(n, "file"), name(Role::FileSizeMb), name(Role::FileCount)
+            )],
+        ));
+    } else if let (Some(secs), Some(n), None) = (seconds, count, size_mb) {
+        let duration = secs * n;
+        let bytes = speed * 1_000_000_000 / 8 * 2 * duration;
+        let mut lines = vec![format!(
+            "The capture runs for {} ({} × {}). The size depends on the traffic; this assumes a {speed} Gbit/s link completely full in both directions the whole time, so real captures are normally far smaller.",
+            human_duration(duration), name(Role::RotateSeconds), name(Role::FileCount)
+        )];
+        if let Some(s) = snap.filter(|s| *s < FULL_FRAME) {
+            let typical = bytes * (s + PCAP_RECORD) / (FULL_FRAME + 20);
+            lines.push(format!(
+                "If that traffic is mostly full-size 1500-byte frames, the {s}-byte snap length cuts it to about {} per interface.",
+                human_size(typical)
+            ));
+        }
+        limits.push((bytes, "worst", lines));
+    }
+    if let Some(n) = packets {
+        let per_packet = snap.unwrap_or(MAX_FRAME).min(MAX_FRAME) + PCAP_RECORD;
+        limits.push((
+            n * per_packet + 24,
+            "exact",
+            vec![format!("The capture stops after {} ({}) of at most {per_packet} bytes each.", plural(n, "packet"), name(Role::PacketCount))],
+        ));
+    }
+
+    let nodes: Option<u128> = match st.scope.as_str() {
+        "nodes" => Some(count_nodes(&st.nodes)),
+        "all" => st.est_nodes.parse().ok(),
+        _ => Some(1),
+    };
+    let ifaces: Option<u128> = match (st.iface_mode.as_str(), looped_all) {
+        ("all", true) => st.est_ifaces.parse().ok(),
+        ("all", false) => Some(1),
+        _ => Some(st.ifaces.len() as u128),
+    };
+    let need_nodes = st.scope == "all";
+    let free: Option<u128> = st.free_space.parse::<f64>().ok().map(|gb| (gb * 1e9) as u128);
+
+    let Some((per_stream, kind, mut lines)) = limits.into_iter().min_by_key(|l| l.0) else {
+        let reason = match (size_mb, seconds) {
+            (Some(mb), _) => format!("{} without {} keeps creating {mb} MB files until the capture is stopped.", name(Role::FileSizeMb), name(Role::FileCount)),
+            (None, Some(s)) => format!("{} without {} starts a new file every {} and never stops.", name(Role::RotateSeconds), name(Role::FileCount), human_duration(s)),
+            _ => "Nothing rotates or limits the file, so it grows until the capture is stopped.".to_string(),
+        };
+        cx.warn("estimate", format!("This capture has no size limit and can fill the drive. {reason} Add a file count or a packet count to cap it."));
+        return Estimate { kind: "unbounded", headline: "No upper limit".into(), lines: vec![reason], need_nodes: false, need_ifaces: false, need_link: false };
+    };
+
+    let prefix = if kind == "worst" { "Worst case" } else { "Up to" };
+    let total = nodes.zip(ifaces).map(|(n, i)| per_stream * n * i);
+    let headline = match (total, nodes, ifaces) {
+        (Some(t), _, _) => format!("{prefix} {}", human_size(t)),
+        (None, Some(n), None) => format!("{prefix} {} per interface", human_size(per_stream * n)),
+        (None, None, Some(i)) => format!("{prefix} {} per node", human_size(per_stream * i)),
+        _ => format!("{prefix} {} per interface, per node", human_size(per_stream)),
+    };
+    if let (Some(t), Some(n), Some(i)) = (total, nodes, ifaces) {
+        if n * i > 1 {
+            lines.push(format!("{} per interface × {} × {}.", human_size(per_stream), plural(i, "interface"), plural(n, "node")));
+        }
+        let _ = t;
+    } else {
+        let missing = match (nodes, ifaces) {
+            (None, None) => "the number of nodes and of interfaces per node",
+            (None, _) => "the number of nodes",
+            _ => "the number of interfaces per node",
+        };
+        lines.push(format!("Enter {missing} below to get the total."));
+    }
+    if let Some(free) = free {
+        let compared = total.unwrap_or(per_stream);
+        if compared > free {
+            let what = if kind == "worst" { "The worst case" } else { "The capture" };
+            let scope = if total.is_some() { "" } else { ", before multiplying by the missing counts" };
+            cx.warn(
+                "free_space",
+                format!("{what} ({}{scope}) is larger than the {} GB of free space entered, so it can fill the drive.", human_size(compared), st.free_space),
+            );
+        }
+    }
+    Estimate { kind, headline, lines, need_nodes, need_ifaces: looped_all && st.iface_mode == "all", need_link: kind == "worst" }
+}
+
+fn target_of<'a>(cfg: &'a Config, st: &State) -> &'a Target {
+    cfg.targets.iter().find(|t| t.id == st.target).unwrap_or(&cfg.targets[0])
+}
+
+/// Validate the state and write the command.
+fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
+    let target = target_of(cfg, &st);
+    let scope = st.scope.clone();
+    let scope = scope.as_str();
 
     // Interfaces: a literal name, or a shell loop over several.
     let loop_list: Option<String> = if st.iface_mode == "all" {
         target.all_interfaces.clone().filter(|_| target.any_interface.is_none())
     } else {
         for i in &st.ifaces {
-            if !all_chars(i, "_.:-") {
+            if !valid_iface(i) {
                 cx.error("ifaces", format!("{i:?} is not a valid interface name."));
             }
         }
@@ -346,7 +809,7 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
     // Output file, log and backgrounding only apply when writing to disk.
     let mut dir = target.output_dir.clone();
     if !st.subdir.is_empty() {
-        if !all_chars(&st.subdir, "_./-") || st.subdir.split('/').any(|p| p == ".." || p.is_empty()) {
+        if !valid_subdir(&st.subdir) {
             cx.error("subdir", "The subfolder may only contain letters, digits and _ . - /");
         }
         dir = format!("{dir}/{}", st.subdir);
@@ -376,7 +839,9 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
         let vars = [("hostname", target.hostname.as_str()), ("iface", iface.as_str())];
         let log = format!("{dir}/{}", render(&target.log_name, &vars));
         cmd.push(' ');
-        cmd.push_str(&render(&target.log_redirect, &[("log", &log), ("dir", &dir)]));
+        // An `at` job runs under /bin/sh, which does not understand `&>>`.
+        let redirect = if st.at_start == "now" { &target.log_redirect } else { &target.at_log_redirect };
+        cmd.push_str(&render(redirect, &[("log", &log), ("dir", &dir)]));
     }
     if background {
         cmd.push_str(" &");
@@ -400,20 +865,55 @@ pub fn build(cfg: &Config, pairs: &[(String, String)]) -> Output {
             _ => inner.to_string(),
         }
     };
-    if scope == "nodes" && !(all_chars(&st.nodes, ",-") && st.nodes.starts_with(|c: char| c.is_ascii_digit())) {
+    if scope == "nodes" && !valid_nodes(&st.nodes) {
         cx.error("nodes", "List the node numbers, e.g. 1,2,5 or 1-4.");
     }
     cmd = wrap(&cmd, &mut cx);
     if st.write {
         cmd = format!("{}; {cmd}", render(&target.prepare, &[("dir", &dir)]));
     }
-    let stop_command = background.then(|| wrap(&target.stop, &mut cx));
 
+    // Scheduling: wrap the capture, and optionally the stop command, in `at` jobs.
+    let start_spec = at_spec(&st.at_start, &st.at_start_value, &st.at_start_unit).unwrap_or_else(|e| {
+        cx.error("at_start_value", e);
+        None
+    });
+    let stop_spec = at_spec(&st.at_stop, &st.at_stop_value, &st.at_stop_unit).unwrap_or_else(|e| {
+        cx.error("at_stop_value", e);
+        None
+    });
+    let stop_plain = wrap(&target.stop, &mut cx);
+    let job = |spec: &str, body: &str| format!("{} {spec} <<'EOF'\n{body}\nEOF", target.at_command);
+    if let Some(spec) = &start_spec {
+        cmd = job(spec, &cmd);
+        if !st.write {
+            cx.warn("at_start_value", "A scheduled capture has no screen to print to; turn on \"Write packets to a file\".");
+        }
+    }
+    if let Some(spec) = &stop_spec {
+        let stop_job = job(spec, &stop_plain);
+        // When the capture starts right away, queue the stop first so it is
+        // in place even if the capture runs in the foreground.
+        cmd = if start_spec.is_some() { format!("{cmd}\n{stop_job}") } else { format!("{stop_job}\n{cmd}") };
+        let late = match (st.at_start.as_str(), st.at_stop.as_str()) {
+            ("date", "date") => st.at_stop_value <= st.at_start_value,
+            ("delay", "delay") => delay_minutes(&st.at_stop_value, &st.at_stop_unit) <= delay_minutes(&st.at_start_value, &st.at_start_unit),
+            _ => false,
+        };
+        if late {
+            cx.warn("at_stop_value", "The stop is scheduled at or before the start, so the capture would not be stopped.");
+        }
+    }
+    let stop_command = (background || start_spec.is_some() || stop_spec.is_some()).then_some(stop_plain);
+
+    check_estimate_inputs(cfg, &st, &mut cx);
     let failed = cx.issues.iter().any(|i| i.level == "error");
+    let estimate = (!failed).then(|| estimate(cfg, &st, loop_list.is_some() && st.iface_mode == "all", &mut cx));
     Output {
         command: if failed { String::new() } else { cmd },
         stop_command: if failed { None } else { stop_command },
         issues: cx.issues,
+        estimate,
         state: st,
     }
 }
@@ -517,6 +1017,175 @@ mod tests {
             assert!(o.command.is_empty(), "{q} must not yield a command");
             assert!(o.stop_command.is_none());
         }
+    }
+
+    fn warnings(o: &Output) -> Vec<&str> {
+        o.issues.iter().filter(|i| i.level == "warning").map(|i| i.message.as_str()).collect()
+    }
+
+    #[test]
+    fn estimate_for_a_ring_buffer_is_exact() {
+        // 10 files of 1024 MB on 2 interfaces of this node.
+        let o = run("v=1&if=bxe0,bxe1&w=1&bg=1&f.s=600&f.C=1024&f.W=10");
+        let e = o.estimate.as_ref().unwrap();
+        assert_eq!((e.kind, e.headline.as_str()), ("exact", "Up to 20.5 GB"));
+        assert!(!e.need_nodes && !e.need_ifaces && !e.need_link);
+        assert!(warnings(&o).is_empty(), "{:?}", o.issues);
+        // Named nodes are counted from the list, ranges included.
+        let o = run("v=1&sc=nodes&n=1,2,5-8&if=lagg1&w=1&bg=1&f.C=1000&f.W=100");
+        assert_eq!(o.estimate.unwrap().headline, "Up to 600 GB");
+    }
+
+    #[test]
+    fn estimate_asks_for_counts_the_command_cannot_know() {
+        let q = "v=1&sc=all&im=all&w=1&bg=1&f.C=500&f.W=5";
+        let e = run(q).estimate.unwrap();
+        assert!(e.need_nodes && e.need_ifaces);
+        assert_eq!(e.headline, "Up to 2.5 GB per interface, per node");
+        assert!(e.lines.last().unwrap().contains("number of nodes and of interfaces"));
+        let e = run(&format!("{q}&en=4")).estimate.unwrap();
+        assert_eq!(e.headline, "Up to 10.0 GB per interface");
+        let e = run(&format!("{q}&en=4&ei=3")).estimate.unwrap();
+        assert_eq!(e.headline, "Up to 30.0 GB");
+        // Linux "any" is one capture, so nothing needs to be asked.
+        let e = run("v=1&t=linux&im=all&w=1&f.C=500&f.W=5").estimate.unwrap();
+        assert!(!e.need_ifaces && e.headline == "Up to 2.5 GB");
+    }
+
+    #[test]
+    fn estimate_for_a_timed_capture_is_the_full_link_worst_case() {
+        // 4 hours at 10 Gbit/s, both directions: 2.5 GB/s x 14400 s = 36 TB.
+        let o = run("v=1&if=lagg0&w=1&f.s=600&f.G=3600&f.W=4");
+        let e = o.estimate.as_ref().unwrap();
+        assert_eq!((e.kind, e.headline.as_str(), e.need_link), ("worst", "Worst case 36.0 TB", true));
+        assert!(e.lines[0].contains("4 hours") && e.lines[1].contains("600-byte snap length"));
+        let e = run("v=1&if=lagg0&w=1&f.s=0&f.G=300&f.W=1&ls=1").estimate.unwrap();
+        assert_eq!(e.headline, "Worst case 75.0 GB");
+        assert_eq!(e.lines.len(), 1);
+        // A packet count caps it exactly, and the smaller limit wins.
+        let e = run("v=1&if=lagg0&w=1&f.s=600&f.G=3600&f.W=4&f.c=1000").estimate.unwrap();
+        assert_eq!((e.kind, e.headline.as_str()), ("exact", "Up to 616 KB"));
+    }
+
+    #[test]
+    fn warns_when_nothing_caps_the_capture_or_it_exceeds_free_space() {
+        for q in ["v=1&w=1", "v=1&w=1&f.s=600", "v=1&w=1&f.C=1024", "v=1&w=1&f.G=3600"] {
+            let o = run(q);
+            assert_eq!(o.estimate.as_ref().unwrap().kind, "unbounded", "{q}");
+            assert!(warnings(&o).iter().any(|w| w.contains("can fill the drive")), "{q}");
+            assert!(!o.command.is_empty());
+        }
+        let q = "v=1&if=bxe0,bxe1&w=1&bg=1&f.C=1024&f.W=10";
+        assert!(warnings(&run(&format!("{q}&fs=50"))).is_empty());
+        let o = run(&format!("{q}&fs=20"));
+        assert!(warnings(&o)[0].contains("larger than the 20 GB of free space"));
+        // Printing to the screen uses no disk and never warns.
+        let o = run("v=1&t=linux&w=0&fs=1");
+        assert_eq!(o.estimate.as_ref().unwrap().kind, "none");
+        assert!(warnings(&o).is_empty());
+    }
+
+    #[test]
+    fn estimate_inputs_are_validated_and_fixable() {
+        for q in ["en=0", "en=abc", "ei=-1", "ls=7", "fs=lots", "fs=1e400"] {
+            assert!(!errors(&run(q)).is_empty(), "{q}");
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}");
+        }
+    }
+
+    #[test]
+    fn scheduled_start_wraps_the_capture_in_an_at_job() {
+        let o = run("v=1&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=time&asv=01:00");
+        assert!(errors(&o).is_empty(), "{:?}", o.issues);
+        let lines: Vec<&str> = o.command.lines().collect();
+        assert_eq!((lines[0], lines[2], lines.len()), ("at 01:00 <<'EOF'", "EOF", 3));
+        // Inside the job the log redirect is the /bin/sh form.
+        assert!(lines[1].starts_with("mkdir -p ") && lines[1].contains(".log 2>&1 &") && !lines[1].contains("&>>"));
+        assert_eq!(o.stop_command.as_deref(), Some("killall -SIGINT tcpdump"));
+
+        let o = run("v=1&t=linux&w=1&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30");
+        assert!(o.command.starts_with("sudo at -t 202611120130 <<'EOF'\n"));
+        let o = run("v=1&w=1&f.C=500&f.W=5&as=delay&asv=90&asu=minutes");
+        assert!(o.command.starts_with("at now + 90 minutes <<'EOF'\n"));
+    }
+
+    #[test]
+    fn scheduled_stop_adds_a_second_job() {
+        let o = run("v=1&sc=all&if=lagg0&w=1&bg=1&f.C=500&f.W=5&as=time&asv=01:00&ae=time&aev=05:00");
+        assert!(o.command.ends_with("EOF\nat 05:00 <<'EOF'\nisi_for_array -X 'killall -SIGINT tcpdump'\nEOF"), "{}", o.command);
+        // Starting now: the stop is queued first, then the capture runs.
+        let o = run("v=1&if=lagg0&w=1&bg=0&lg=0&f.C=500&f.W=5&ae=delay&aev=2&aeu=hours");
+        assert!(o.command.starts_with("at now + 2 hours <<'EOF'\nkillall -SIGINT tcpdump\nEOF\nmkdir -p "), "{}", o.command);
+        assert!(o.stop_command.is_some());
+        let o = run("v=1&w=1&f.C=500&f.W=5&as=delay&asv=3&asu=hours&ae=delay&aev=60&aeu=minutes");
+        assert!(warnings(&o).iter().any(|w| w.contains("at or before the start")));
+    }
+
+    #[test]
+    fn schedule_values_are_validated_and_fixable() {
+        for q in [
+            "as=time&asv=25:00", "as=time&asv=1am;reboot", "as=date&asv=2026-13-01T00:00", "as=date&asv=tomorrow",
+            "as=delay&asv=0", "as=delay&asv=5&asu=fortnights", "as=delay&asv=5;id", "ae=time&aev=", "ae=delay&aev=x",
+        ] {
+            let o = run(q);
+            assert!(!errors(&o).is_empty() && o.command.is_empty(), "{q}");
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}");
+            assert!(!f.output.command.contains("at "), "{q}");
+        }
+    }
+
+    #[test]
+    fn fix_moves_values_to_the_nearest_valid_one() {
+        let f = fix(&cfg(), &parse_query("v=1&t=powerscale&f.s=99999999&f.C=0&f.B=abc&f.W=4"));
+        assert!(errors(&f.output).is_empty(), "{:?}", f.output.issues);
+        let flags = &f.output.state.flags;
+        // Too-large snap lengths mean "everything", so they go to 0, not the limit.
+        assert_eq!((flags["s"].as_str(), flags["C"].as_str(), flags["B"].as_str()), ("0", "1", "4096"));
+        assert_eq!(f.changes.len(), 3, "{:?}", f.changes);
+        assert!(f.changes[0].contains("-s changed from 99999999 to 0."));
+
+        // Without over_max a value above the limit moves to the limit; below min moves to min.
+        let f = fix(&cfg(), &parse_query("v=1&f.s=-5&f.C=999999999"));
+        let flags = &f.output.state.flags;
+        assert_eq!((flags["s"].as_str(), flags["C"].as_str()), ("0", "102400"));
+    }
+
+    #[test]
+    fn fix_switches_off_clashing_and_orphaned_flags() {
+        let f = fix(&cfg(), &parse_query("v=1&f.C=500&f.G=60&f.W=5"));
+        let flags = &f.output.state.flags;
+        assert!(flags.contains_key("C") && flags.contains_key("W") && !flags.contains_key("G"));
+        let f = fix(&cfg(), &parse_query("v=1&f.W=5"));
+        assert!(!f.output.state.flags.contains_key("W"));
+        assert!(f.changes[0].contains("-W switched off"));
+        assert!(errors(&f.output).is_empty());
+    }
+
+    #[test]
+    fn fix_clears_everything_the_injection_test_rejects() {
+        for q in [
+            "if=eth0;reboot,lagg0", "if=$(reboot)", "sd=../../etc", "sc=nodes&n=1;reboot", "h=1.1.1.1;reboot,10.0.0.1",
+            "p=53;reboot,445", "net=10.0.0.0/8`id`", "q=port 53; reboot", "q=!tcp", "pr=tcp;id", "v=1&f.s=1;id",
+            "v=1&t=linux&f.Z=root;id", "t=nope",
+        ] {
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty(), "{q}: {:?}", f.output.issues);
+            assert!(!f.changes.is_empty(), "{q}");
+            assert!(!f.output.command.is_empty() && !f.output.command.contains("reboot") && !f.output.command.contains(";id"), "{q}");
+        }
+        let f = fix(&cfg(), &parse_query("if=eth0;reboot,lagg0&h=1.1.1.1;reboot,10.0.0.1"));
+        assert_eq!(f.output.state.ifaces, ["lagg0"]);
+        assert_eq!(f.output.state.hosts, ["10.0.0.1"]);
+    }
+
+    #[test]
+    fn fix_leaves_a_valid_setup_alone() {
+        let q = "v=1&t=powerscale&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=3600&f.W=4&h=192.168.1.1";
+        let f = fix(&cfg(), &parse_query(q));
+        assert!(f.changes.is_empty());
+        assert_eq!(f.output.command, run(q).command);
     }
 
     #[test]

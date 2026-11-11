@@ -1,11 +1,12 @@
 mod builder;
 mod config;
+mod parse;
 
 use axum::extract::{RawQuery, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use config::Config;
 use notify::{RecursiveMode, Watcher};
@@ -104,6 +105,7 @@ async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
         "targets": cfg.targets,
         "flags": cfg.flags,
         "filter": cfg.filter,
+        "estimate": cfg.estimate,
         "examples": examples,
     })))
 }
@@ -111,6 +113,37 @@ async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
 async fn api_build(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> impl IntoResponse {
     let pairs = builder::parse_query(query.as_deref().unwrap_or(""));
     no_cache(Json(builder::build(&app.config(), &pairs)))
+}
+
+/// Repair invalid settings. Nothing is applied here: the page shows the
+/// list of changes and only adopts the result once the user confirms.
+async fn api_fix(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> impl IntoResponse {
+    let pairs = builder::parse_query(query.as_deref().unwrap_or(""));
+    let fixed = builder::fix(&app.config(), &pairs);
+    no_cache(Json(json!({ "changes": fixed.changes, "output": fixed.output })))
+}
+
+/// Read an edited command back into builder state. `t` is the system the
+/// page currently has selected, used only to break ties.
+async fn api_parse(State(app): State<Arc<App>>, RawQuery(query): RawQuery, body: String) -> impl IntoResponse {
+    let cfg = app.config();
+    let given = builder::parse_query(query.as_deref().unwrap_or(""));
+    let hint = given.iter().find(|(k, _)| k == "t").map(|(_, v)| v.clone()).unwrap_or_default();
+    no_cache(Json(match parse::parse(&cfg, &body, &hint) {
+        Some(mut parsed) => {
+            // The estimate inputs are not part of a command, so carry them over.
+            parsed.pairs.extend(given.into_iter().filter(|(k, _)| ["en", "ei", "ls", "fs"].contains(&k.as_str())));
+            json!({ "found": true, "notes": parsed.notes, "output": builder::build(&cfg, &parsed.pairs) })
+        }
+        None => json!({ "found": false }),
+    }))
+}
+
+async fn api_theme(State(app): State<Arc<App>>) -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/css; charset=utf-8"), (CACHE_CONTROL, FRESH), (X_CONTENT_TYPE_OPTIONS, "nosniff")],
+        app.config().theme.css(),
+    )
 }
 
 async fn api_events(State(app): State<Arc<App>>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -217,7 +250,10 @@ async fn main() {
         .route("/icon.svg", get(|| async { asset("image/svg+xml", FRESH, ICON_SVG) }))
         .route("/favicon.ico", get(|| async { asset("image/svg+xml", FRESH, ICON_SVG) }))
         .route("/api/config", get(api_config))
+        .route("/theme.css", get(api_theme))
         .route("/api/build", get(api_build))
+        .route("/api/parse", post(api_parse))
+        .route("/api/fix", get(api_fix))
         .route("/api/events", get(api_events))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(app.clone());

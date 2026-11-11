@@ -7,6 +7,7 @@
 <meta name="description" content="Build, adjust and share tcpdump commands for PowerScale and Linux.">
 <link rel="icon" href="static/{{v}}/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="static/{{v}}/style.css">
+<link rel="stylesheet" href="theme.css" id="theme">
 </head>
 <body>
 <p id="config-error" class="banner" role="alert" hidden></p>
@@ -21,6 +22,7 @@
       <a href="#sec-system">System</a>
       <a href="#sec-where">Where to capture</a>
       <a href="#sec-output">Output</a>
+      <a href="#sec-schedule">Schedule</a>
       <a href="#sec-options">Options</a>
       <a href="#sec-filter">Filter</a>
       <a href="#examples-section">Examples</a>
@@ -31,10 +33,20 @@
   <aside id="result" aria-live="polite">
     <div class="result-head">
       <h2>Command</h2>
-      <button type="button" id="copy-command" class="primary">Copy</button>
+      <div class="buttons">
+        <button type="button" id="parse" hidden>Parse</button>
+        <button type="button" id="revert" hidden>Undo edit</button>
+        <button type="button" id="copy-command" class="primary">Copy</button>
+      </div>
     </div>
-    <pre id="command" tabindex="0"></pre>
+    <textarea id="command" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off"
+      aria-label="Command. Edit it, then choose Parse to update the settings."
+      aria-describedby="command-hint"
+      placeholder="Fix the problems below to get a command, or paste one here and choose Parse."></textarea>
+    <p id="command-hint" class="note">You can edit or paste a command here, then choose Parse to update the settings to match.</p>
+    <ul id="parse-notes" hidden></ul>
     <ul id="issues"></ul>
+    <button type="button" id="fix" hidden>Fix problems…</button>
     <div id="stop" hidden>
       <div class="result-head">
         <h3>To stop the capture</h3>
@@ -43,6 +55,29 @@
       <pre id="stop-command" tabindex="0"></pre>
     </div>
     <p id="stop-note" class="note" hidden>The capture runs in the foreground. Press Ctrl-C to stop it.</p>
+    <section id="estimate" aria-labelledby="estimate-title" hidden>
+      <h3 id="estimate-title">Capture size estimate</h3>
+      <p id="est-headline"></p>
+      <ul id="est-lines"></ul>
+      <div id="est-inputs">
+        <label class="field" for="est_nodes" id="est_nodes-field" hidden>
+          <span>Number of nodes in the cluster</span>
+          <input id="est_nodes" type="number" min="1" inputmode="numeric" placeholder="e.g. 4">
+        </label>
+        <label class="field" for="est_ifaces" id="est_ifaces-field" hidden>
+          <span>Interfaces captured on each node</span>
+          <input id="est_ifaces" type="number" min="1" inputmode="numeric" placeholder="e.g. 2">
+        </label>
+        <label class="field" for="link_speed" id="link_speed-field" hidden>
+          <span>Link speed of each interface</span>
+          <select id="link_speed"></select>
+        </label>
+        <label class="field" for="free_space" id="free_space-field">
+          <span>Free space on the capture drive, in GB (optional)</span>
+          <input id="free_space" type="number" min="0" inputmode="decimal" placeholder="e.g. 500">
+        </label>
+      </div>
+    </section>
     <div class="actions">
       <button type="button" id="copy-link">Copy link to this setup</button>
       <button type="button" id="reset">Reset</button>
@@ -59,6 +94,15 @@
   <p>Check interface names, paths and free disk space before running a capture.</p>
   <p id="links" class="links" hidden></p>
 </footer>
+<dialog id="fix-dialog" aria-labelledby="fix-title">
+  <h2 id="fix-title">Apply these fixes?</h2>
+  <p id="fix-intro" class="note"></p>
+  <ul id="fix-changes"></ul>
+  <div class="actions">
+    <button type="button" id="fix-apply" class="primary">Apply fixes</button>
+    <button type="button" id="fix-cancel">Cancel</button>
+  </div>
+</dialog>
 <script src="static/{{v}}/app.js"></script>
 </body>
 </html>

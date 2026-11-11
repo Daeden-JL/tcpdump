@@ -28,6 +28,59 @@ url = "https://github.com/Daeden-JL/tcpdump/blob/main/LICENSE"
 label = "MIT License"
 
 # ---------------------------------------------------------------------------
+# Theme. `mode` is "auto" (follow the visitor's system setting), "light" or
+# "dark". Colours are hex values; delete any line to fall back to the default.
+#
+#   bg / panel          page background / cards and the navigation panel
+#   ink / muted / line  main text / secondary text / borders
+#   accent / accent_ink buttons, links and flag names / text on accent buttons
+#   soft                highlighted chips and the recommendation note
+#   code_bg / code_ink  command boxes
+#   error / warn        problem messages
+# ---------------------------------------------------------------------------
+
+[theme]
+mode = "auto"
+
+[theme.light]
+bg = "#f4f6f5"
+panel = "#ffffff"
+ink = "#17211d"
+muted = "#5a6964"
+line = "#d5dcd9"
+accent = "#0b6e4f"
+accent_ink = "#ffffff"
+soft = "#e4f1ec"
+code_bg = "#10201a"
+code_ink = "#d6f5e6"
+error = "#a4262c"
+warn = "#8a5a00"
+
+[theme.dark]
+bg = "#0e1513"
+panel = "#16201c"
+ink = "#e3ece8"
+muted = "#96a8a1"
+line = "#2b3a35"
+accent = "#4fd1a1"
+accent_ink = "#06231a"
+soft = "#1d3029"
+code_bg = "#0a100e"
+code_ink = "#c9f2df"
+error = "#ff8f8f"
+warn = "#f0c060"
+
+# ---------------------------------------------------------------------------
+# Capture size estimate. Size-rotated captures have an exact limit. Timed
+# captures depend on traffic, so the estimate assumes a link of the chosen
+# speed completely full in both directions.
+# ---------------------------------------------------------------------------
+
+[estimate]
+link_speeds_gbit = [1, 10, 25, 40, 100]
+default_link_speed_gbit = 10
+
+# ---------------------------------------------------------------------------
 # Targets: the systems a command can be generated for.
 #
 # Templates may use these placeholders:
@@ -35,6 +88,10 @@ label = "MIT License"
 #   prepare              : {dir}
 #   log_redirect         : {log} {dir}
 #   cluster templates    : {command} {nodes}
+#
+# Scheduling: `at_command` queues the job, `at_log_redirect` replaces
+# `log_redirect` inside a job (jobs run under /bin/sh), and `at_note` is shown
+# next to the schedule settings.
 # ---------------------------------------------------------------------------
 
 [[targets]]
@@ -52,6 +109,9 @@ log_redirect = "&>> {log}"
 log_default = true
 background_default = true
 stop = "killall -SIGINT tcpdump"
+at_command = "at"
+at_log_redirect = ">> {log} 2>&1"
+at_note = "The job is queued on the node where you paste the command and runs there under /bin/sh. On FreeBSD-based systems queued jobs are started by a periodic task, so the capture can begin up to five minutes after the set time. List queued jobs with atq and remove one with atrm."
 default_interface = "lagg0"
 interface_hint = "e.g. lagg0, or several: bxe0, bxe1"
 all_interfaces = '`ifconfig | grep -B2 ether | grep flags | cut -d: -f1`'
@@ -70,6 +130,8 @@ output_dir = "~/tcpdump_capture"
 hostname = "$(hostname -s)"
 log_redirect = ">> {log} 2>&1"
 stop = "sudo pkill -INT tcpdump"
+at_command = "sudo at"
+at_note = "Needs the at package with atd running. The job is queued as root, so the capture folder ~ is root's home. List queued jobs with sudo atq and remove one with sudo atrm."
 default_interface = "eth0"
 interface_hint = "e.g. eth0, ens192, bond0"
 any_interface = "any"
@@ -83,13 +145,18 @@ any_interface = "any"
 #   description     one line, always visible
 #   explanation     longer background, shown on demand
 #   recommendations common values with the reason to pick each; one click applies
+#   validation      { min, max } limits; optional over_max is what Fix uses
+#                   for a value above max (default: max itself)
 #   dependencies    needs at least one of these flags to be on
 #   exclusions      cannot be combined with these flags
+#   role            what the flag means to the size estimate: snap_length,
+#                   file_size_mb, file_count, rotate_seconds or packet_count
 #   targets         limit the flag to some target ids (default: all)
 # ---------------------------------------------------------------------------
 
 [[flags]]
 name = "-s"
+role = "snap_length"
 label = "Snap length"
 description = "Bytes captured from each packet. 0 means the whole packet."
 explanation = """
@@ -100,7 +167,8 @@ look at."""
 value_type = "Integer"
 default_value = 900
 enabled = true
-validation = { min = 0, max = 262144 }
+# A value above the maximum is repaired to 0 (whole packet) rather than to the maximum.
+validation = { min = 0, max = 262144, over_max = 0 }
 
 [[flags.recommendations]]
 value = 320
@@ -129,6 +197,7 @@ reason = "Nothing is cut off, including jumbo frames. Largest files; use when th
 
 [[flags]]
 name = "-C"
+role = "file_size_mb"
 label = "Rotate by size"
 description = "Start a new file each time the current one reaches this many megabytes."
 explanation = """
@@ -152,6 +221,7 @@ reason = "Fewer files to manage on fast links; still workable in Wireshark."
 
 [[flags]]
 name = "-G"
+role = "rotate_seconds"
 label = "Rotate by time"
 description = "Start a new file every N seconds."
 explanation = """
@@ -176,6 +246,7 @@ reason = "A sensible piece size for captures that run for hours."
 
 [[flags]]
 name = "-W"
+role = "file_count"
 label = "File count"
 description = "Number of files to keep (with -C) or to write before stopping (with -G)."
 explanation = """
@@ -199,6 +270,7 @@ reason = "With -C 1024: a 10 GB ring per interface, enough to catch most intermi
 
 [[flags]]
 name = "-c"
+role = "packet_count"
 label = "Packet count"
 description = "Stop after capturing this many packets."
 value_type = "Integer"

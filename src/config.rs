@@ -1,7 +1,7 @@
 //! The TOML configuration: schema, loading and validation.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -10,6 +10,10 @@ pub struct Config {
     pub version: String,
     #[serde(default)]
     pub site: Site,
+    #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
+    pub estimate: EstimateConfig,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub flags: Vec<Flag>,
@@ -17,6 +21,120 @@ pub struct Config {
     pub filter: FilterConfig,
     #[serde(default)]
     pub examples: Vec<Example>,
+}
+
+/// Inputs for the capture size estimate.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EstimateConfig {
+    /// Link speeds offered for the worst-case estimate of timed captures.
+    #[serde(default = "d_link_speeds")]
+    pub link_speeds_gbit: Vec<u64>,
+    #[serde(default = "d_link_speed")]
+    pub default_link_speed_gbit: u64,
+}
+
+impl Default for EstimateConfig {
+    fn default() -> Self {
+        EstimateConfig { link_speeds_gbit: d_link_speeds(), default_link_speed_gbit: d_link_speed() }
+    }
+}
+
+fn d_link_speeds() -> Vec<u64> {
+    vec![1, 10, 25, 40, 100]
+}
+fn d_link_speed() -> u64 {
+    10
+}
+
+/// What a flag means for the size estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    SnapLength,
+    FileSizeMb,
+    FileCount,
+    RotateSeconds,
+    PacketCount,
+}
+
+/// Colours. `light` and `dark` override individual entries of [`PALETTE`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Theme {
+    #[serde(default)]
+    pub mode: ThemeMode,
+    #[serde(default)]
+    pub light: BTreeMap<String, String>,
+    #[serde(default)]
+    pub dark: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Follow the visitor's system setting.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+/// Every colour the page uses: (name in the TOML, light default, dark default).
+pub const PALETTE: &[(&str, &str, &str)] = &[
+    ("bg", "#f4f6f5", "#0e1513"),
+    ("panel", "#ffffff", "#16201c"),
+    ("ink", "#17211d", "#e3ece8"),
+    ("muted", "#5a6964", "#96a8a1"),
+    ("line", "#d5dcd9", "#2b3a35"),
+    ("accent", "#0b6e4f", "#4fd1a1"),
+    ("accent_ink", "#ffffff", "#06231a"),
+    ("soft", "#e4f1ec", "#1d3029"),
+    ("code_bg", "#10201a", "#0a100e"),
+    ("code_ink", "#d6f5e6", "#c9f2df"),
+    ("error", "#a4262c", "#ff8f8f"),
+    ("warn", "#8a5a00", "#f0c060"),
+];
+
+impl Theme {
+    fn block(&self, dark: bool) -> String {
+        let overrides = if dark { &self.dark } else { &self.light };
+        PALETTE
+            .iter()
+            .map(|(key, light, dark_default)| {
+                let value = overrides.get(*key).map_or(if dark { *dark_default } else { *light }, String::as_str);
+                format!("--{}:{value};", key.replace('_', "-"))
+            })
+            .collect()
+    }
+
+    /// The stylesheet served at `/theme.css`.
+    pub fn css(&self) -> String {
+        let (light, dark) = (self.block(false), self.block(true));
+        match self.mode {
+            ThemeMode::Light => format!(":root{{color-scheme:light;{light}}}\n"),
+            ThemeMode::Dark => format!(":root{{color-scheme:dark;{dark}}}\n"),
+            ThemeMode::Auto => format!(
+                ":root{{color-scheme:light dark;{light}}}\n@media (prefers-color-scheme:dark){{:root{{{dark}}}}}\n"
+            ),
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        for (mode, colours) in [("light", &self.light), ("dark", &self.dark)] {
+            for (key, value) in colours {
+                if !PALETTE.iter().any(|p| p.0 == key) {
+                    let known: Vec<&str> = PALETTE.iter().map(|p| p.0).collect();
+                    return Err(format!("theme.{mode}.{key} is not a colour name; use one of: {}", known.join(", ")));
+                }
+                let hex = value.strip_prefix('#').unwrap_or("");
+                if !matches!(hex.len(), 3 | 4 | 6 | 8) || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("theme.{mode}.{key} must be a hex colour such as #0b6e4f, not {value:?}"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -91,6 +209,15 @@ pub struct Target {
     pub background_default: bool,
     #[serde(default = "d_stop")]
     pub stop: String,
+    /// The `at` command used to schedule a capture.
+    #[serde(default = "d_at_command")]
+    pub at_command: String,
+    /// Log redirect used inside an `at` job, which runs under /bin/sh.
+    #[serde(default = "d_log_redirect")]
+    pub at_log_redirect: String,
+    /// Shown next to the schedule settings.
+    #[serde(default)]
+    pub at_note: String,
     pub default_interface: String,
     #[serde(default)]
     pub interface_hint: String,
@@ -154,6 +281,9 @@ pub struct Flag {
     pub targets: Vec<String>,
     #[serde(default)]
     pub choices: Vec<String>,
+    /// Tells the size estimate what this flag controls.
+    #[serde(default)]
+    pub role: Option<Role>,
     /// Common values and why you would pick them.
     #[serde(default)]
     pub recommendations: Vec<Recommendation>,
@@ -174,6 +304,10 @@ pub struct Recommendation {
 pub struct Validation {
     pub min: Option<i64>,
     pub max: Option<i64>,
+    /// What Fix uses for a value above `max`, instead of `max` itself
+    /// (for snap length, 0: "whole packet" is what a huge value means).
+    #[serde(default)]
+    pub over_max: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -235,6 +369,9 @@ fn d_prepare() -> String {
 fn d_log_redirect() -> String {
     ">> {log} 2>&1".into()
 }
+fn d_at_command() -> String {
+    "at".into()
+}
 fn d_stop() -> String {
     "killall -SIGINT tcpdump".into()
 }
@@ -285,6 +422,23 @@ impl Config {
                 return Err(format!("{name}.url must start with https:// or http:// while the link is enabled"));
             }
         }
+        self.theme.validate()?;
+        if !self.estimate.link_speeds_gbit.contains(&self.estimate.default_link_speed_gbit) {
+            return Err("estimate.default_link_speed_gbit must be one of estimate.link_speeds_gbit".into());
+        }
+        if self.estimate.link_speeds_gbit.iter().any(|s| *s == 0 || *s > 1000) {
+            return Err("estimate.link_speeds_gbit entries must be between 1 and 1000".into());
+        }
+        let mut roles = Vec::new();
+        for f in self.flags.iter().filter(|f| f.role.is_some()) {
+            if f.value_type != ValueType::Integer {
+                return Err(format!("flag {} has a role, so its value_type must be Integer", f.name));
+            }
+            if roles.contains(&f.role) {
+                return Err(format!("flag {} repeats a role another flag already has", f.name));
+            }
+            roles.push(f.role);
+        }
         let mut ids = HashSet::new();
         for t in &self.targets {
             if t.id.is_empty() || !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -305,6 +459,12 @@ impl Config {
             }
             if !names.insert(key) {
                 return Err(format!("duplicate flag {:?}", f.name));
+            }
+            if let Some(v) = &f.validation {
+                let outside = |n: i64| v.min.is_some_and(|m| n < m) || v.max.is_some_and(|m| n > m);
+                if v.over_max.is_some_and(outside) {
+                    return Err(format!("flag {}: validation.over_max must itself be between min and max", f.name));
+                }
             }
             if f.value_type == ValueType::Choice && f.choices.is_empty() {
                 return Err(format!("flag {} has value_type Choice but no choices", f.name));
@@ -356,5 +516,30 @@ mod tests {
     fn enabled_footer_links_need_a_web_address() {
         let bad = SHIPPED.replacen("url = \"https://github.com/Daeden-JL/tcpdump\"", "url = \"javascript:alert(1)\"", 1);
         assert!(Config::parse(&bad).unwrap_err().contains("site.repo.url"));
+    }
+
+    #[test]
+    fn theme_modes_and_overrides() {
+        let cfg = Config::parse(SHIPPED).unwrap();
+        let css = cfg.theme.css();
+        assert!(css.contains("color-scheme:light dark") && css.contains("prefers-color-scheme:dark"));
+        assert!(css.contains("--accent-ink:#ffffff;") && css.contains("--bg:#0e1513;"));
+
+        let forced = SHIPPED.replacen("mode = \"auto\"", "mode = \"dark\"", 1).replacen("accent = \"#4fd1a1\"", "accent = \"#ff00aa\"", 1);
+        let css = Config::parse(&forced).unwrap().theme.css();
+        assert!(css.starts_with(":root{color-scheme:dark;") && !css.contains("@media"));
+        assert!(css.contains("--accent:#ff00aa;") && !css.contains("#f4f6f5"));
+
+        let minimal = "version = \"1\"\n[theme.light]\naccent = \"#123\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
+        let css = Config::parse(minimal).unwrap().theme.css();
+        assert!(css.contains("--accent:#123;") && css.contains("--panel:#ffffff;"));
+    }
+
+    #[test]
+    fn theme_rejects_unknown_names_and_unsafe_values() {
+        let head = "version = \"1\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
+        for bad in ["[theme.light]\nbackground = \"#fff\"", "[theme.dark]\nbg = \"red;} body{display:none\"", "[theme]\nmode = \"neon\""] {
+            assert!(Config::parse(&format!("{head}{bad}\n")).is_err(), "{bad}");
+        }
     }
 }

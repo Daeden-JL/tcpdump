@@ -54,12 +54,57 @@ function serialise(skip = []) {
     const k = flagKey(f);
     if (k in s.flags) p.push([`f.${k}`, f.value_type === "Bool" ? "1" : flagValues[k] ?? ""]);
   }
+  if (s.at_start !== "now") {
+    p.push(["as", s.at_start], ["asv", s.at_start_value.trim()]);
+    if (s.at_start === "delay") p.push(["asu", s.at_start_unit]);
+  }
+  if (s.at_stop !== "none") {
+    p.push(["ae", s.at_stop], ["aev", s.at_stop_value.trim()]);
+    if (s.at_stop === "delay") p.push(["aeu", s.at_stop_unit]);
+  }
+  p.push(...estimatePairs());
   if (list(s.hosts)) p.push(["h", list(s.hosts)]);
   if (list(s.ports)) p.push(["p", list(s.ports)]);
   if (list(s.nets)) p.push(["net", list(s.nets)]);
   if (s.proto) p.push(["pr", s.proto]);
   if (s.raw.trim()) p.push(["q", s.raw.trim()]);
   return p.filter(([k]) => !skip.includes(k)).map(([k, v]) => `${k}=${enc(v)}`).join("&");
+}
+
+// Estimate inputs: only the ones that are filled in or differ from the default.
+function estimatePairs() {
+  const s = state;
+  const p = [];
+  if (s.est_nodes.trim()) p.push(["en", s.est_nodes.trim()]);
+  if (s.est_ifaces.trim()) p.push(["ei", s.est_ifaces.trim()]);
+  if (s.link_speed !== String(config.estimate.default_link_speed_gbit)) p.push(["ls", s.link_speed]);
+  if (s.free_space.trim()) p.push(["fs", s.free_space.trim()]);
+  return p;
+}
+
+const ESTIMATE_INPUTS = ["est_nodes", "est_ifaces", "link_speed", "free_space"];
+
+// Put the state into the estimate inputs. They live outside the form so they
+// are never rebuilt while someone is typing in them.
+function syncEstimateInputs() {
+  $("#link_speed").replaceChildren(...config.estimate.link_speeds_gbit.map((g) =>
+    el("option", { value: String(g), text: `${g} Gbit/s` })));
+  for (const id of ESTIMATE_INPUTS) {
+    const input = document.getElementById(id);
+    if (input.value !== state[id]) input.value = state[id];
+  }
+}
+
+function showEstimate(est) {
+  $("#estimate").hidden = !est;
+  if (!est) return;
+  $("#est-headline").textContent = est.headline;
+  $("#est-headline").className = est.kind;
+  $("#est-lines").replaceChildren(...est.lines.map((l) => el("li", { text: l })));
+  $("#est-inputs").hidden = est.kind === "none";
+  $("#est_nodes-field").hidden = !est.need_nodes;
+  $("#est_ifaces-field").hidden = !est.need_ifaces;
+  $("#link_speed-field").hidden = !est.need_link;
 }
 
 function adopt(serverState) {
@@ -113,6 +158,56 @@ function radios(name, key, options) {
 
 function section(id, title, ...kids) {
   return el("fieldset", { id: `sec-${id}` }, el("legend", { text: title }), ...kids);
+}
+
+// A sensible starting value when a schedule mode is picked.
+function scheduleDefault(mode) {
+  if (mode === "time") return "01:00";
+  if (mode === "delay") return "1";
+  if (mode !== "date") return "";
+  const d = new Date(Date.now() + 24 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T01:00`;
+}
+
+// One half of the schedule: mode radios plus the input that mode needs.
+// `which` is "at_start" or "at_stop"; `off` is the mode meaning "not scheduled".
+function scheduleControls(which, off, offLabel, legend) {
+  const mode = state[which];
+  const valueKey = `${which}_value`;
+  const unitKey = `${which}_unit`;
+  const modes = [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"]];
+  const pick = (value) => {
+    state[which] = value;
+    state[valueKey] = scheduleDefault(value);
+    changed(true);
+  };
+  const onValue = (e) => { state[valueKey] = e.target.value; changed(false); };
+  let input = null;
+  if (mode === "time") {
+    input = el("label", { class: "field", for: valueKey },
+      el("span", { text: "Time (24-hour). Runs the next time the clock reaches it." }),
+      el("input", { id: valueKey, type: "time", value: state[valueKey], oninput: onValue }));
+  } else if (mode === "date") {
+    input = el("label", { class: "field", for: valueKey },
+      el("span", { text: "Date and time, in the time zone of the system running the capture" }),
+      el("input", { id: valueKey, type: "datetime-local", value: state[valueKey], oninput: onValue }));
+  } else if (mode === "delay") {
+    input = el("div", { class: "field delay" },
+      el("label", { for: valueKey }, el("span", { text: "Delay from when the command is pasted" })),
+      el("div", { class: "pair" },
+        el("input", { id: valueKey, type: "number", min: 1, value: state[valueKey], "aria-label": "Delay amount", oninput: onValue }),
+        el("select", { id: unitKey, "aria-label": "Delay unit", onchange: (e) => { state[unitKey] = e.target.value; changed(false); } },
+          ["minutes", "hours", "days"].map((u) => el("option", { value: u, text: u, selected: u === state[unitKey] })))));
+  }
+  return [
+    el("p", { class: "sub", text: legend }),
+    el("div", { class: "radios", role: "radiogroup", "aria-label": legend }, modes.map(([value, label]) =>
+      el("label", { class: "check", for: `${which}-${value}` },
+        el("input", { id: `${which}-${value}`, type: "radio", name: which, checked: mode === value, onchange: () => pick(value) }),
+        el("span", { text: label })))),
+    input,
+  ];
 }
 
 function flagRow(f) {
@@ -199,6 +294,12 @@ function renderForm() {
     s.write && check("background", "Run in the background", "background"),
     s.write && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })));
 
+  const schedule = section("schedule", "Schedule",
+    el("p", { class: "desc", text: "Queue the capture with the at command instead of starting it straight away, and optionally queue the stop as well." }),
+    scheduleControls("at_start", "now", "Start now", "Start"),
+    scheduleControls("at_stop", "none", "Stop manually", "Stop"),
+    (s.at_start !== "now" || s.at_stop !== "none") && t.at_note && el("p", { class: "desc", text: t.at_note }));
+
   const flags = section("options", "Options", visibleFlags().map(flagRow));
 
   const filter = section("filter", "Filter",
@@ -218,21 +319,135 @@ function renderForm() {
         onclick: () => { s.raw = s.raw.trim() ? `${s.raw.trim()} or ${sn.expression}` : sn.expression; changed(true); },
       }))));
 
-  $("#form").replaceChildren(system, where, output, flags, filter);
+  $("#form").replaceChildren(system, where, output, schedule, flags, filter);
+  syncEstimateInputs();
+  markFields(lastIssues);
   if (focused) document.getElementById(focused)?.focus();
 }
 
 // ---- output ---------------------------------------------------------------
 
-function showOutput(out) {
-  const pre = $("#command");
-  pre.textContent = out.command || "Fix the problems below to get a command.";
-  pre.classList.toggle("empty", !out.command);
-  $("#copy-command").disabled = !out.command;
+// ---- problems: flag the fields, offer a fix ---------------------------------
+
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value"];
+let lastIssues = [];
+let pendingFix = null;
+
+// Outline each setting that has an error and put the message next to it.
+function markFields(issues) {
+  lastIssues = issues;
+  for (const n of document.querySelectorAll(".field-error")) n.remove();
+  for (const n of document.querySelectorAll(".invalid")) {
+    n.classList.remove("invalid");
+    n.removeAttribute("aria-invalid");
+  }
+  for (const issue of issues) {
+    if (issue.level !== "error") continue;
+    let input = null;
+    let anchor = null;
+    if (issue.field.startsWith("f.")) {
+      const key = issue.field.slice(2);
+      input = document.getElementById(`flag-${key}-value`) || document.getElementById(`flag-${key}`);
+      anchor = input && input.closest(".flag-head");
+    } else if (FIELD_IDS.includes(issue.field)) {
+      input = document.getElementById(issue.field);
+      anchor = input && input.closest(".field");
+    }
+    if (!input || !anchor) continue;
+    input.classList.add("invalid");
+    input.setAttribute("aria-invalid", "true");
+    anchor.after(el("p", { class: "field-error", text: issue.message }));
+  }
+}
+
+// Ask the server what it would change, then let the user confirm.
+async function proposeFix() {
+  const result = await getJSON(`api/fix?${serialise()}`);
+  const left = result.output.issues.filter((i) => i.level === "error").length;
+  pendingFix = result.changes.length ? result : null;
+  $("#fix-title").textContent = pendingFix ? "Apply these fixes?" : "Nothing to fix automatically";
+  $("#fix-intro").textContent = !pendingFix
+    ? "These problems need to be corrected by hand."
+    : left
+      ? `These changes will be made to your settings. ${left} problem${left === 1 ? "" : "s"} will remain to correct by hand.`
+      : "These changes will be made to your settings, and the command will be rewritten to match.";
+  $("#fix-changes").replaceChildren(...result.changes.map((c) => el("li", { text: c })));
+  $("#fix-apply").hidden = !pendingFix;
+  $("#fix-cancel").textContent = pendingFix ? "Cancel" : "Close";
+  $("#fix-dialog").showModal();
+}
+
+function applyFix() {
+  $("#fix-dialog").close();
+  if (!pendingFix) return;
+  const out = pendingFix.output;
+  pendingFix = null;
+  buildSeq++;
+  flagValues = {};
+  adopt(out.state);
+  renderForm();
+  showOutput(out);
+  showNotes([]);
+  history.replaceState(null, "", `?${serialise()}`);
+}
+
+let generated = ""; // the command as the builder last wrote it
+
+function fitCommand() {
+  const box = $("#command");
+  box.style.height = "auto";
+  box.style.height = `${box.scrollHeight + 2}px`;
+}
+
+// Parse and Undo appear only while the box differs from the builder's command.
+function markEdited() {
+  const box = $("#command");
+  const edited = box.value !== generated;
+  box.classList.toggle("edited", edited);
+  $("#parse").hidden = !edited || !box.value.trim();
+  $("#revert").hidden = !edited;
+  $("#copy-command").disabled = !box.value.trim();
+  fitCommand();
+}
+
+function showNotes(notes) {
+  $("#parse-notes").hidden = !notes.length;
+  $("#parse-notes").replaceChildren(...notes.map((n) => el("li", { text: n })));
+}
+
+function showOutput(out, keepText) {
+  generated = out.command;
+  if (!keepText) $("#command").value = out.command;
+  markEdited();
   $("#issues").replaceChildren(...out.issues.map((i) => el("li", { class: i.level, text: i.message })));
+  $("#fix").hidden = !out.issues.some((i) => i.level === "error");
+  showEstimate(out.estimate);
+  markFields(out.issues);
   $("#stop").hidden = !out.stop_command;
   $("#stop-command").textContent = out.stop_command || "";
   $("#stop-note").hidden = !out.command || !!out.stop_command;
+}
+
+// Send the edited text to the server, which reads it back into settings.
+async function parseCommand() {
+  const text = $("#command").value;
+  const seq = ++buildSeq;
+  const keep = [["t", state.target], ...estimatePairs()].map(([k, v]) => `${k}=${enc(v)}`).join("&");
+  const res = await fetch(`api/parse?${keep}`, { method: "POST", body: text });
+  if (!res.ok) throw new Error(`api/parse: ${res.status}`);
+  const result = await res.json();
+  if (seq !== buildSeq) return;
+  if (!result.found) {
+    showNotes(["No tcpdump command was found in that text, so nothing was changed."]);
+    return;
+  }
+  flagValues = {};
+  adopt(result.output.state);
+  renderForm();
+  // If the parsed settings do not build, keep the text so it can be corrected.
+  showOutput(result.output, !result.output.command);
+  showNotes(result.notes);
+  history.replaceState(null, "", `?${serialise()}`);
 }
 
 async function refresh() {
@@ -241,7 +456,10 @@ async function refresh() {
   const seq = ++buildSeq;
   try {
     const out = await getJSON(`api/build?${query}`);
-    if (seq === buildSeq) showOutput(out);
+    if (seq === buildSeq) {
+      showOutput(out);
+      showNotes([]);
+    }
   } catch (e) {
     console.error(e);
   }
@@ -255,6 +473,7 @@ async function load(query, updateUrl) {
   adopt(out.state);
   renderForm();
   showOutput(out);
+  showNotes([]);
   if (updateUrl) history.replaceState(null, "", `?${serialise()}`);
 }
 
@@ -315,7 +534,28 @@ function shareLink() {
 }
 
 async function main() {
-  $("#copy-command").addEventListener("click", (e) => copy($("#command").textContent, e.currentTarget));
+  $("#copy-command").addEventListener("click", (e) => copy($("#command").value, e.currentTarget));
+  $("#command").addEventListener("input", markEdited);
+  $("#command").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !$("#parse").hidden) parseCommand().catch(console.error);
+  });
+  $("#parse").addEventListener("click", () => parseCommand().catch(console.error));
+  $("#revert").addEventListener("click", () => {
+    $("#command").value = generated;
+    markEdited();
+    showNotes([]);
+  });
+  window.addEventListener("resize", fitCommand);
+  for (const id of ESTIMATE_INPUTS) {
+    const input = document.getElementById(id);
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
+      state[id] = input.value;
+      changed(false);
+    });
+  }
+  $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
+  $("#fix-apply").addEventListener("click", applyFix);
+  $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());
   $("#copy-stop").addEventListener("click", (e) => copy($("#stop-command").textContent, e.currentTarget));
   $("#copy-link").addEventListener("click", (e) => copy(shareLink(), e.currentTarget));
   $("#reset").addEventListener("click", async () => {
@@ -335,6 +575,7 @@ async function main() {
   events.addEventListener("config", async (e) => {
     if (Number(e.data) === seen) return;
     seen = Number(e.data);
+    $("#theme").href = `theme.css?g=${seen}`;
     await loadConfig();
     await load(serialise(), location.search !== "");
   });
@@ -342,5 +583,5 @@ async function main() {
 
 main().catch((e) => {
   console.error(e);
-  $("#command").textContent = "The builder could not be loaded. Reload the page to try again.";
+  $("#command").placeholder = "The builder could not be loaded. Reload the page to try again.";
 });
