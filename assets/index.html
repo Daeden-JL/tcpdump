@@ -9,15 +9,24 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="top">
-  <img src="icon.svg" alt="" width="44" height="44">
-  <div>
-    <h1 id="title">tcpdump.dev</h1>
-    <p id="tagline"></p>
-  </div>
-</header>
 <p id="config-error" class="banner" role="alert" hidden></p>
 <main>
+  <header class="top">
+    <img src="icon.svg" alt="" width="44" height="44">
+    <div>
+      <h1 id="title">tcpdump.dev</h1>
+      <p id="tagline"></p>
+    </div>
+    <nav id="sections" aria-label="Sections">
+      <a href="#sec-system">System</a>
+      <a href="#sec-where">Where to capture</a>
+      <a href="#sec-output">Output</a>
+      <a href="#sec-options">Options</a>
+      <a href="#sec-filter">Filter</a>
+      <a href="#examples-section">Examples</a>
+    </nav>
+    <p id="side-links" class="links" hidden></p>
+  </header>
   <form id="form" autocomplete="off" novalidate></form>
   <aside id="result" aria-live="polite">
     <div class="result-head">
@@ -48,7 +57,7 @@
 </section>
 <footer>
   <p>Check interface names, paths and free disk space before running a capture.</p>
-  <p id="links" hidden></p>
+  <p id="links" class="links" hidden></p>
 </footer>
 <script src="app.js"></script>
 </body>

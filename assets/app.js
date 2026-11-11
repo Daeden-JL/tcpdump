@@ -111,8 +111,8 @@ function radios(name, key, options) {
       el("span", { text: label }))));
 }
 
-function section(title, ...kids) {
-  return el("fieldset", {}, el("legend", { text: title }), ...kids);
+function section(id, title, ...kids) {
+  return el("fieldset", { id: `sec-${id}` }, el("legend", { text: title }), ...kids);
 }
 
 function flagRow(f) {
@@ -177,21 +177,21 @@ function renderForm() {
   const s = state;
   const canAll = t.all_interfaces || t.any_interface;
 
-  const system = section("System",
+  const system = section("system", "System",
     el("div", { class: "radios", role: "radiogroup" }, config.targets.map((x) =>
       el("label", { class: "check", for: `target-${x.id}` },
         el("input", { id: `target-${x.id}`, type: "radio", name: "target", checked: x.id === s.target, onchange: () => switchTarget(x.id) }),
         el("span", { text: x.name })))),
     t.description && el("p", { class: "desc", text: t.description }));
 
-  const where = section("Where to capture",
+  const where = section("where", "Where to capture",
     t.cluster && radios("scope", "scope", [["node", "This node"], ["all", "All nodes"], ["nodes", "Selected nodes"]]),
     t.cluster && s.scope === "nodes" && textField("nodes", "Node numbers", "nodes", t.cluster.nodes_hint),
     radios("iface_mode", "iface_mode", [["named", "Named interface(s)"], ...(canAll ? [["all", "All interfaces"]] : [])]),
     s.iface_mode === "named" && textField("ifaces", "Interface(s), comma separated", "ifaces", t.interface_hint));
 
   const dirPreview = [t.output_dir, s.subdir.trim().replace(/^\/+|\/+$/g, ""), s.dated ? t.date_subdir : ""].filter(Boolean).join("/");
-  const output = section("Output",
+  const output = section("output", "Output",
     check("write", "Write packets to a file (off prints them to the screen)", "write"),
     s.write && textField("subdir", `Subfolder under ${t.output_dir} (optional)`, "subdir", "e.g. a case number, NDMP, CIFS"),
     s.write && check("dated", "Add a folder for today's date", "dated"),
@@ -199,9 +199,9 @@ function renderForm() {
     s.write && check("background", "Run in the background", "background"),
     s.write && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })));
 
-  const flags = section("Options", visibleFlags().map(flagRow));
+  const flags = section("options", "Options", visibleFlags().map(flagRow));
 
-  const filter = section("Filter",
+  const filter = section("filter", "Filter",
     el("p", { class: "desc", text: "Leave everything empty to capture all traffic. Hosts and networks are alternatives; the groups are combined with \"and\"." }),
     textField("hosts", "Hosts", "hosts", "192.168.1.1, 192.168.1.2"),
     textField("nets", "Networks", "nets", "172.26.0.0/16"),
@@ -287,8 +287,10 @@ async function loadConfig() {
   const links = [[config.site.repo, "Source code"], [config.site.license, "License"]]
     .filter(([l]) => l && l.enabled && l.url)
     .map(([l, fallback]) => el("a", { href: l.url, rel: "noopener", text: l.label || fallback }));
-  $("#links").hidden = !links.length;
-  $("#links").replaceChildren(...links);
+  for (const box of [$("#links"), $("#side-links")]) {
+    box.hidden = !links.length;
+    box.replaceChildren(...links.map((a) => a.cloneNode(true)));
+  }
   renderExamples();
 }
 
