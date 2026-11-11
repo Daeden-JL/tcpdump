@@ -37,6 +37,12 @@ save are still picked up. Put a TLS-terminating reverse proxy (Caddy, nginx)
 in front for a public site. The page uses relative addresses, so it also works
 under a path prefix as long as the proxy strips the prefix.
 
+The page loads its script, stylesheet and icon from addresses that contain a
+fingerprint of their content (`/static/<fingerprint>/…`), so browsers and CDNs
+can cache them indefinitely and a new build is never shown with old styling.
+The page itself is served with `Cache-Control: no-store`; if you put a CDN in
+front, do not configure it to cache HTML.
+
 ## Configuration
 
 [`tcpdump.toml`](tcpdump.toml) is commented throughout. The main parts:
