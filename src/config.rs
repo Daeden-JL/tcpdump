@@ -209,6 +209,15 @@ pub struct Target {
     pub background_default: bool,
     #[serde(default = "d_stop")]
     pub stop: String,
+    /// The `at` command used to schedule a capture.
+    #[serde(default = "d_at_command")]
+    pub at_command: String,
+    /// Log redirect used inside an `at` job, which runs under /bin/sh.
+    #[serde(default = "d_log_redirect")]
+    pub at_log_redirect: String,
+    /// Shown next to the schedule settings.
+    #[serde(default)]
+    pub at_note: String,
     pub default_interface: String,
     #[serde(default)]
     pub interface_hint: String,
@@ -359,6 +368,9 @@ fn d_prepare() -> String {
 }
 fn d_log_redirect() -> String {
     ">> {log} 2>&1".into()
+}
+fn d_at_command() -> String {
+    "at".into()
 }
 fn d_stop() -> String {
     "killall -SIGINT tcpdump".into()

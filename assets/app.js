@@ -54,6 +54,14 @@ function serialise(skip = []) {
     const k = flagKey(f);
     if (k in s.flags) p.push([`f.${k}`, f.value_type === "Bool" ? "1" : flagValues[k] ?? ""]);
   }
+  if (s.at_start !== "now") {
+    p.push(["as", s.at_start], ["asv", s.at_start_value.trim()]);
+    if (s.at_start === "delay") p.push(["asu", s.at_start_unit]);
+  }
+  if (s.at_stop !== "none") {
+    p.push(["ae", s.at_stop], ["aev", s.at_stop_value.trim()]);
+    if (s.at_stop === "delay") p.push(["aeu", s.at_stop_unit]);
+  }
   p.push(...estimatePairs());
   if (list(s.hosts)) p.push(["h", list(s.hosts)]);
   if (list(s.ports)) p.push(["p", list(s.ports)]);
@@ -152,6 +160,56 @@ function section(id, title, ...kids) {
   return el("fieldset", { id: `sec-${id}` }, el("legend", { text: title }), ...kids);
 }
 
+// A sensible starting value when a schedule mode is picked.
+function scheduleDefault(mode) {
+  if (mode === "time") return "01:00";
+  if (mode === "delay") return "1";
+  if (mode !== "date") return "";
+  const d = new Date(Date.now() + 24 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T01:00`;
+}
+
+// One half of the schedule: mode radios plus the input that mode needs.
+// `which` is "at_start" or "at_stop"; `off` is the mode meaning "not scheduled".
+function scheduleControls(which, off, offLabel, legend) {
+  const mode = state[which];
+  const valueKey = `${which}_value`;
+  const unitKey = `${which}_unit`;
+  const modes = [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"]];
+  const pick = (value) => {
+    state[which] = value;
+    state[valueKey] = scheduleDefault(value);
+    changed(true);
+  };
+  const onValue = (e) => { state[valueKey] = e.target.value; changed(false); };
+  let input = null;
+  if (mode === "time") {
+    input = el("label", { class: "field", for: valueKey },
+      el("span", { text: "Time (24-hour). Runs the next time the clock reaches it." }),
+      el("input", { id: valueKey, type: "time", value: state[valueKey], oninput: onValue }));
+  } else if (mode === "date") {
+    input = el("label", { class: "field", for: valueKey },
+      el("span", { text: "Date and time, in the time zone of the system running the capture" }),
+      el("input", { id: valueKey, type: "datetime-local", value: state[valueKey], oninput: onValue }));
+  } else if (mode === "delay") {
+    input = el("div", { class: "field delay" },
+      el("label", { for: valueKey }, el("span", { text: "Delay from when the command is pasted" })),
+      el("div", { class: "pair" },
+        el("input", { id: valueKey, type: "number", min: 1, value: state[valueKey], "aria-label": "Delay amount", oninput: onValue }),
+        el("select", { id: unitKey, "aria-label": "Delay unit", onchange: (e) => { state[unitKey] = e.target.value; changed(false); } },
+          ["minutes", "hours", "days"].map((u) => el("option", { value: u, text: u, selected: u === state[unitKey] })))));
+  }
+  return [
+    el("p", { class: "sub", text: legend }),
+    el("div", { class: "radios", role: "radiogroup", "aria-label": legend }, modes.map(([value, label]) =>
+      el("label", { class: "check", for: `${which}-${value}` },
+        el("input", { id: `${which}-${value}`, type: "radio", name: which, checked: mode === value, onchange: () => pick(value) }),
+        el("span", { text: label })))),
+    input,
+  ];
+}
+
 function flagRow(f) {
   const k = flagKey(f);
   const on = k in state.flags;
@@ -236,6 +294,12 @@ function renderForm() {
     s.write && check("background", "Run in the background", "background"),
     s.write && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })));
 
+  const schedule = section("schedule", "Schedule",
+    el("p", { class: "desc", text: "Queue the capture with the at command instead of starting it straight away, and optionally queue the stop as well." }),
+    scheduleControls("at_start", "now", "Start now", "Start"),
+    scheduleControls("at_stop", "none", "Stop manually", "Stop"),
+    (s.at_start !== "now" || s.at_stop !== "none") && t.at_note && el("p", { class: "desc", text: t.at_note }));
+
   const flags = section("options", "Options", visibleFlags().map(flagRow));
 
   const filter = section("filter", "Filter",
@@ -255,7 +319,7 @@ function renderForm() {
         onclick: () => { s.raw = s.raw.trim() ? `${s.raw.trim()} or ${sn.expression}` : sn.expression; changed(true); },
       }))));
 
-  $("#form").replaceChildren(system, where, output, flags, filter);
+  $("#form").replaceChildren(system, where, output, schedule, flags, filter);
   syncEstimateInputs();
   markFields(lastIssues);
   if (focused) document.getElementById(focused)?.focus();
@@ -265,7 +329,7 @@ function renderForm() {
 
 // ---- problems: flag the fields, offer a fix ---------------------------------
 
-const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space"];
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value"];
 let lastIssues = [];
 let pendingFix = null;
 

@@ -36,6 +36,15 @@ pub struct State {
     pub nets: Vec<String>,
     pub proto: String,
     pub raw: String,
+    /// Scheduling with `at`. Start mode is "now", "time", "date" or "delay";
+    /// stop mode is "none" or one of the last three. The value is HH:MM,
+    /// YYYY-MM-DDTHH:MM or a number, and the unit applies to a delay.
+    pub at_start: String,
+    pub at_start_value: String,
+    pub at_start_unit: String,
+    pub at_stop: String,
+    pub at_stop_value: String,
+    pub at_stop_unit: String,
     /// Estimate inputs: counts the command cannot tell us, link speed in
     /// Gbit/s, and free space in GB. They never change the command.
     pub est_nodes: String,
@@ -420,6 +429,16 @@ pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
         changes.push(format!("Protocol {:?} removed.", st.proto));
         st.proto.clear();
     }
+    if at_spec(&st.at_start, &st.at_start_value, &st.at_start_unit).is_err() {
+        changes.push("The start schedule is not valid; changed to \"Start now\".".into());
+        st.at_start = "now".into();
+        st.at_start_value.clear();
+    }
+    if at_spec(&st.at_stop, &st.at_stop_value, &st.at_stop_unit).is_err() {
+        changes.push("The stop schedule is not valid; changed to \"Stop manually\".".into());
+        st.at_stop = "none".into();
+        st.at_stop_value.clear();
+    }
     for (value, what) in [(&mut st.est_nodes, "Number of nodes"), (&mut st.est_ifaces, "Number of interfaces")] {
         if !value.is_empty() && !valid_count(value) {
             changes.push(format!("{what} for the estimate ({value:?}) cleared."));
@@ -494,6 +513,18 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
         nets: split_list(get("net")),
         proto: get("pr").to_string(),
         raw: get("q").to_string(),
+        at_start: match get("as") {
+            m @ ("time" | "date" | "delay") => m.to_string(),
+            _ => "now".to_string(),
+        },
+        at_start_value: get("asv").trim().to_string(),
+        at_start_unit: if get("asu").is_empty() { "hours".to_string() } else { get("asu").to_string() },
+        at_stop: match get("ae") {
+            m @ ("time" | "date" | "delay") => m.to_string(),
+            _ => "none".to_string(),
+        },
+        at_stop_value: get("aev").trim().to_string(),
+        at_stop_unit: if get("aeu").is_empty() { "hours".to_string() } else { get("aeu").to_string() },
         est_nodes: get("en").trim().to_string(),
         est_ifaces: get("ei").trim().to_string(),
         link_speed: match get("ls").trim() {
@@ -502,6 +533,55 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
         },
         free_space: get("fs").trim().to_string(),
     }
+}
+
+pub const AT_UNITS: [&str; 3] = ["minutes", "hours", "days"];
+
+fn two_digits(s: &str, max: u32) -> bool {
+    s.len() == 2 && s.parse::<u32>().is_ok_and(|n| n <= max)
+}
+
+/// The time argument for `at`, or why the schedule is not usable.
+/// `Ok(None)` means nothing is scheduled.
+fn at_spec(mode: &str, value: &str, unit: &str) -> Result<Option<String>, String> {
+    match mode {
+        "time" => match value.split_once(':') {
+            Some((h, m)) if two_digits(h, 23) && two_digits(m, 59) => Ok(Some(value.to_string())),
+            _ => Err("Enter the time as HH:MM, for example 01:00.".into()),
+        },
+        "date" => {
+            // YYYY-MM-DDTHH:MM, as a date-and-time input produces it.
+            let b = value.as_bytes();
+            let shaped = b.len() == 16 && b[4] == b'-' && b[7] == b'-' && b[10] == b'T' && b[13] == b':';
+            let digits = |r: std::ops::Range<usize>| value.get(r).filter(|s| s.bytes().all(|c| c.is_ascii_digit()));
+            match (shaped, digits(0..4), digits(5..7), digits(8..10), digits(11..13), digits(14..16)) {
+                (true, Some(y), Some(mo), Some(d), Some(h), Some(mi))
+                    if (1..=12).contains(&mo.parse().unwrap_or(0))
+                        && (1..=31).contains(&d.parse().unwrap_or(0))
+                        && two_digits(h, 23)
+                        && two_digits(mi, 59) =>
+                {
+                    Ok(Some(format!("-t {y}{mo}{d}{h}{mi}")))
+                }
+                _ => Err("Pick a date and a time.".into()),
+            }
+        }
+        "delay" => {
+            if !AT_UNITS.contains(&unit) {
+                return Err("Pick minutes, hours or days.".into());
+            }
+            match value.parse::<u32>() {
+                Ok(n) if (1..=100_000).contains(&n) => Ok(Some(format!("now + {n} {unit}"))),
+                _ => Err("Enter the delay as a whole number of 1 or more.".into()),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn delay_minutes(value: &str, unit: &str) -> Option<u64> {
+    let n: u64 = value.parse().ok()?;
+    Some(n * match unit { "days" => 1440, "hours" => 60, _ => 1 })
 }
 
 fn human_size(bytes: u128) -> String {
@@ -759,7 +839,9 @@ fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
         let vars = [("hostname", target.hostname.as_str()), ("iface", iface.as_str())];
         let log = format!("{dir}/{}", render(&target.log_name, &vars));
         cmd.push(' ');
-        cmd.push_str(&render(&target.log_redirect, &[("log", &log), ("dir", &dir)]));
+        // An `at` job runs under /bin/sh, which does not understand `&>>`.
+        let redirect = if st.at_start == "now" { &target.log_redirect } else { &target.at_log_redirect };
+        cmd.push_str(&render(redirect, &[("log", &log), ("dir", &dir)]));
     }
     if background {
         cmd.push_str(" &");
@@ -790,7 +872,39 @@ fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
     if st.write {
         cmd = format!("{}; {cmd}", render(&target.prepare, &[("dir", &dir)]));
     }
-    let stop_command = background.then(|| wrap(&target.stop, &mut cx));
+
+    // Scheduling: wrap the capture, and optionally the stop command, in `at` jobs.
+    let start_spec = at_spec(&st.at_start, &st.at_start_value, &st.at_start_unit).unwrap_or_else(|e| {
+        cx.error("at_start_value", e);
+        None
+    });
+    let stop_spec = at_spec(&st.at_stop, &st.at_stop_value, &st.at_stop_unit).unwrap_or_else(|e| {
+        cx.error("at_stop_value", e);
+        None
+    });
+    let stop_plain = wrap(&target.stop, &mut cx);
+    let job = |spec: &str, body: &str| format!("{} {spec} <<'EOF'\n{body}\nEOF", target.at_command);
+    if let Some(spec) = &start_spec {
+        cmd = job(spec, &cmd);
+        if !st.write {
+            cx.warn("at_start_value", "A scheduled capture has no screen to print to; turn on \"Write packets to a file\".");
+        }
+    }
+    if let Some(spec) = &stop_spec {
+        let stop_job = job(spec, &stop_plain);
+        // When the capture starts right away, queue the stop first so it is
+        // in place even if the capture runs in the foreground.
+        cmd = if start_spec.is_some() { format!("{cmd}\n{stop_job}") } else { format!("{stop_job}\n{cmd}") };
+        let late = match (st.at_start.as_str(), st.at_stop.as_str()) {
+            ("date", "date") => st.at_stop_value <= st.at_start_value,
+            ("delay", "delay") => delay_minutes(&st.at_stop_value, &st.at_stop_unit) <= delay_minutes(&st.at_start_value, &st.at_start_unit),
+            _ => false,
+        };
+        if late {
+            cx.warn("at_stop_value", "The stop is scheduled at or before the start, so the capture would not be stopped.");
+        }
+    }
+    let stop_command = (background || start_spec.is_some() || stop_spec.is_some()).then_some(stop_plain);
 
     check_estimate_inputs(cfg, &st, &mut cx);
     let failed = cx.issues.iter().any(|i| i.level == "error");
@@ -977,6 +1091,48 @@ mod tests {
             assert!(!errors(&run(q)).is_empty(), "{q}");
             let f = fix(&cfg(), &parse_query(q));
             assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}");
+        }
+    }
+
+    #[test]
+    fn scheduled_start_wraps_the_capture_in_an_at_job() {
+        let o = run("v=1&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=time&asv=01:00");
+        assert!(errors(&o).is_empty(), "{:?}", o.issues);
+        let lines: Vec<&str> = o.command.lines().collect();
+        assert_eq!((lines[0], lines[2], lines.len()), ("at 01:00 <<'EOF'", "EOF", 3));
+        // Inside the job the log redirect is the /bin/sh form.
+        assert!(lines[1].starts_with("mkdir -p ") && lines[1].contains(".log 2>&1 &") && !lines[1].contains("&>>"));
+        assert_eq!(o.stop_command.as_deref(), Some("killall -SIGINT tcpdump"));
+
+        let o = run("v=1&t=linux&w=1&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30");
+        assert!(o.command.starts_with("sudo at -t 202611120130 <<'EOF'\n"));
+        let o = run("v=1&w=1&f.C=500&f.W=5&as=delay&asv=90&asu=minutes");
+        assert!(o.command.starts_with("at now + 90 minutes <<'EOF'\n"));
+    }
+
+    #[test]
+    fn scheduled_stop_adds_a_second_job() {
+        let o = run("v=1&sc=all&if=lagg0&w=1&bg=1&f.C=500&f.W=5&as=time&asv=01:00&ae=time&aev=05:00");
+        assert!(o.command.ends_with("EOF\nat 05:00 <<'EOF'\nisi_for_array -X 'killall -SIGINT tcpdump'\nEOF"), "{}", o.command);
+        // Starting now: the stop is queued first, then the capture runs.
+        let o = run("v=1&if=lagg0&w=1&bg=0&lg=0&f.C=500&f.W=5&ae=delay&aev=2&aeu=hours");
+        assert!(o.command.starts_with("at now + 2 hours <<'EOF'\nkillall -SIGINT tcpdump\nEOF\nmkdir -p "), "{}", o.command);
+        assert!(o.stop_command.is_some());
+        let o = run("v=1&w=1&f.C=500&f.W=5&as=delay&asv=3&asu=hours&ae=delay&aev=60&aeu=minutes");
+        assert!(warnings(&o).iter().any(|w| w.contains("at or before the start")));
+    }
+
+    #[test]
+    fn schedule_values_are_validated_and_fixable() {
+        for q in [
+            "as=time&asv=25:00", "as=time&asv=1am;reboot", "as=date&asv=2026-13-01T00:00", "as=date&asv=tomorrow",
+            "as=delay&asv=0", "as=delay&asv=5&asu=fortnights", "as=delay&asv=5;id", "ae=time&aev=", "ae=delay&aev=x",
+        ] {
+            let o = run(q);
+            assert!(!errors(&o).is_empty() && o.command.is_empty(), "{q}");
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}");
+            assert!(!f.output.command.contains("at "), "{q}");
         }
     }
 

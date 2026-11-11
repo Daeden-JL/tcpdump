@@ -5,6 +5,7 @@
 //! The result is a query (the same form as a share link), so it goes through
 //! the builder's normal validation before any command is shown again.
 
+use crate::builder::AT_UNITS;
 use crate::config::{Cluster, Config, Flag, Target, ValueType};
 
 pub struct Parsed {
@@ -234,6 +235,64 @@ fn guided_filter(words: &[String], protocols: &[String]) -> Option<Guided> {
     Some(g)
 }
 
+/// Turn an `at` time argument back into (mode, value, unit).
+fn read_at_spec(spec: &str) -> Option<(&'static str, String, String)> {
+    let words: Vec<&str> = spec.split_whitespace().collect();
+    match words[..] {
+        ["now", "+", n, unit] => {
+            let unit = AT_UNITS.iter().find(|u| **u == unit || u.trim_end_matches('s') == unit)?;
+            Some(("delay", n.to_string(), unit.to_string()))
+        }
+        ["-t", t] if t.len() == 12 && t.bytes().all(|c| c.is_ascii_digit()) => {
+            Some(("date", format!("{}-{}-{}T{}:{}", &t[..4], &t[4..6], &t[6..8], &t[8..10], &t[10..]), String::new()))
+        }
+        [t] if t.len() == 5 && t.as_bytes()[2] == b':' => Some(("time", t.to_string(), String::new())),
+        _ => None,
+    }
+}
+
+/// Pull `at ... <<'EOF'` jobs out of the text. Returns the text with only the
+/// capture command left in it, and the schedule as query pairs.
+fn split_schedule(text: &str, notes: &mut Vec<String>) -> (String, Vec<(String, String)>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        let at = line.strip_prefix("sudo ").unwrap_or(line).strip_prefix("at ").and_then(|rest| rest.split_once("<<"));
+        let Some((spec, delimiter)) = at else {
+            kept.push(lines[i]);
+            i += 1;
+            continue;
+        };
+        let delimiter = delimiter.trim().trim_start_matches('-').trim_matches(['\'', '"']);
+        let body_start = i + 1;
+        while i + 1 < lines.len() && lines[i + 1].trim() != delimiter {
+            i += 1;
+        }
+        let body = &lines[body_start..=i.max(body_start - 1)];
+        i += 2;
+        // A job with a capture in it is the start; anything else is the stop.
+        let is_start = find_tcpdump(&body.join(" ")).is_some();
+        match read_at_spec(spec) {
+            Some((mode, value, unit)) => {
+                let (m, v, u) = if is_start { ("as", "asv", "asu") } else { ("ae", "aev", "aeu") };
+                pairs.push((m.into(), mode.into()));
+                pairs.push((v.into(), value));
+                if !unit.is_empty() {
+                    pairs.push((u.into(), unit));
+                }
+            }
+            None => notes.push(format!("The schedule \"at {}\" is not a form the builder can set and was left out.", spec.trim())),
+        }
+        if is_start {
+            kept.extend(body);
+        }
+    }
+    (kept.join("\n"), pairs)
+}
+
 fn simple_name(s: &str, extra: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
@@ -241,13 +300,14 @@ fn simple_name(s: &str, extra: &str) -> bool {
 /// Parse `text`; `hint` is the target currently selected in the builder.
 /// Returns `None` when there is no tcpdump command in the text at all.
 pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
+    let target = pick_target(cfg, text, hint);
+    let mut notes: Vec<String> = Vec::new();
+    let (text, schedule) = split_schedule(text, &mut notes);
     let text = text.replace("\\\n", " ").replace(['\n', '\r'], " ");
     let start = find_tcpdump(&text)?;
-    let target = pick_target(cfg, &text, hint);
     let Scan { tokens, stop } = scan(&text[start..]);
     let tail = &text[start + stop..];
 
-    let mut notes: Vec<String> = Vec::new();
     let mut pairs: Vec<(String, String)> = vec![("v".into(), "1".into()), ("t".into(), target.id.clone())];
     let mut put = |k: &str, v: &str| pairs.push((k.to_string(), v.to_string()));
 
@@ -416,6 +476,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
             put("q", &filter);
         }
     }
+    pairs.extend(schedule);
     Some(Parsed { pairs, notes })
 }
 
@@ -443,6 +504,25 @@ mod tests {
             assert_eq!(again.command, original.command, "{}", ex.title);
             assert_eq!(again.stop_command, original.stop_command, "{}", ex.title);
         }
+    }
+
+    #[test]
+    fn scheduled_commands_survive_a_round_trip() {
+        let cfg = cfg();
+        for q in [
+            "v=1&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=time&asv=01:00",
+            "v=1&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30&ae=date&aev=2026-11-12T05:00",
+            "v=1&if=lagg0&w=1&dd=1&lg=0&bg=0&f.s=600&f.C=500&f.W=5&ae=delay&aev=2&aeu=hours",
+            "v=1&t=linux&if=eth0&w=1&dd=1&lg=1&bg=0&f.s=600&f.G=300&f.W=2&as=delay&asv=90&asu=minutes&p=53",
+        ] {
+            let original = build(&cfg, &parse_query(q));
+            assert!(original.command.contains("<<'EOF'"), "{q}");
+            let parsed = parse(&cfg, &original.command, "").expect("command found");
+            assert!(parsed.notes.is_empty(), "{q}: {:?}", parsed.notes);
+            assert_eq!(build(&cfg, &parsed.pairs).command, original.command, "{q}");
+        }
+        let p = parse(&cfg, "at 1am tomorrow <<EOF\ntcpdump -i eth0 -w /tmp/x.pcap\nEOF", "linux").unwrap();
+        assert!(get(&p, "as").is_none() && p.notes.iter().any(|n| n.contains("1am tomorrow")));
     }
 
     #[test]

@@ -230,4 +230,18 @@ dialog::backdrop { background: rgb(0 0 0 / 0.5); }
 #est-lines li { margin-bottom: 3px; }
 #est-inputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; }
 #est-inputs .field { margin: 6px 0; }
+.sub { margin: 12px 0 0; font-size: 0.85rem; font-weight: 650; }
+.field.delay label span { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 3px; }
+.field.delay .pair { display: flex; gap: 8px; }
+.field.delay .pair select { width: auto; flex: none; }
+input[type="time"], input[type="datetime-local"] {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 0.9rem var(--mono);
+}
+textarea#command { white-space: pre-wrap; }
 [hidden] { display: none !important; }

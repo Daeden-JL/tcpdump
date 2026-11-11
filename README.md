@@ -111,6 +111,25 @@ confirm:
 - a flag that clashes with another, or lacks the flag it depends on, is switched off;
 - invalid interfaces, hosts, networks, ports, subfolders and filter text are removed.
 
+## Scheduling with `at`
+
+The **Schedule** section queues the capture with `at` instead of starting it
+straight away, and can queue the stop command as a second job. Each can be a
+clock time (`at 01:00`), a date and time (`at -t 202611120100`) or a delay
+(`at now + 2 hours`). The capture is wrapped in a here-document so it runs
+exactly as written:
+
+```bash
+at 01:00 <<'EOF'
+mkdir -p /ifs/data/Isilon_Support/$(date +%F); tcpdump -i lagg0 ...
+EOF
+```
+
+`at` jobs run under `/bin/sh`, so inside a job the log redirect comes from
+`at_log_redirect` (`>> file 2>&1`) instead of `log_redirect`. Per system,
+`at_command` sets how the job is queued (`sudo at` on Linux) and `at_note` is
+the text shown beside the settings. Parse reads these jobs back.
+
 ## Capture size estimate
 
 The result panel shows how much disk the capture can use:
