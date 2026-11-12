@@ -130,6 +130,47 @@ EOF
 `at_command` sets how the job is queued (`sudo at` on Linux) and `at_note` is
 the text shown beside the settings. Parse reads these jobs back.
 
+### Listing and removing scheduled jobs
+
+Whenever a capture is scheduled, the result panel shows the commands for
+looking after it: `atq`, `at -c <job number>` and `atrm <job number>` for `at`
+jobs, or `crontab -l` and a ready-made removal command for a recurring
+capture. They come from `at_list`, `at_show`, `at_remove`, `cron_list` and
+`cron_remove` in the TOML.
+
+### Recurring captures with cron
+
+Choosing **Repeat (cron)** as the start installs a recurring capture: every
+day at a time, on chosen weekdays, every few hours, or a custom five-field
+cron expression. Cron treats `%` specially and tcpdump file names are full of
+them, so the capture is written into a small script and the crontab gets one
+line that runs it:
+
+```bash
+cat > /ifs/data/Isilon_Support/tcpdump_nightly.sh <<'EOF'
+#!/bin/sh
+mkdir -p /ifs/data/Isilon_Support/$(date +%F); tcpdump -i lagg0 ...
+EOF
+chmod +x /ifs/data/Isilon_Support/tcpdump_nightly.sh
+(crontab -l 2>/dev/null | grep -v '/ifs/data/Isilon_Support/tcpdump_nightly.sh'; echo '30 1 * * 1-5 /ifs/data/Isilon_Support/tcpdump_nightly.sh') | crontab -
+```
+
+Running it again replaces the earlier line instead of adding a second one.
+A recurring capture can be stopped a set time after each start (a `sleep`
+inside the script). The page warns when a recurring capture would never end
+by itself, and that files accumulate from run to run. `cron_install`,
+`cron_remove` and `cron_dir` in the TOML control how and where it is installed.
+
+## Placeholders
+
+Interfaces, node numbers, the subfolder, hosts, networks and ports can be
+left open as a placeholder such as `<interface>` or `<client IP address>`
+(type it, or use the "Leave open as ..." button under the field). The command
+then shows the placeholder, and anyone opening the link gets a **Fill in
+before running** panel at the top with one box per placeholder. What they type
+is checked like any other value and put into the command; the settings keep
+the placeholder, so the same link can be handed on again.
+
 ## Capture size estimate
 
 The result panel shows how much disk the capture can use:

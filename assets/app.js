@@ -35,7 +35,8 @@ async function getJSON(url) {
 const target = () => config.targets.find((t) => t.id === state.target) || config.targets[0];
 const flagKey = (f) => f.name.replace(/^-+/, "");
 const visibleFlags = () => config.flags.filter((f) => !f.targets.length || f.targets.includes(state.target));
-const list = (text) => text.split(/[\s,]+/).filter(Boolean).join(",");
+// Normalise a typed list to comma-separated, keeping <a placeholder> whole.
+const list = (text) => (text.match(/<[^<>]*>|[^\s,<]+/g) || []).join(",");
 const enc = (v) => encodeURIComponent(v).replace(/%2C/g, ",").replace(/%2F/g, "/").replace(/%3A/g, ":");
 
 function serialise(skip = []) {
@@ -54,7 +55,14 @@ function serialise(skip = []) {
     const k = flagKey(f);
     if (k in s.flags) p.push([`f.${k}`, f.value_type === "Bool" ? "1" : flagValues[k] ?? ""]);
   }
-  if (s.at_start !== "now") {
+  if (s.at_start === "cron") {
+    p.push(["as", "cron"], ["ck", s.cron_kind]);
+    if (s.cron_kind === "daily" || s.cron_kind === "weekdays") p.push(["ct", s.cron_time]);
+    if (s.cron_kind === "weekdays") p.push(["cd", s.cron_days]);
+    if (s.cron_kind === "hours") p.push(["ch", s.cron_hours.trim()]);
+    if (s.cron_kind === "custom") p.push(["cx", s.cron_expr.trim()]);
+    p.push(["cn", s.cron_name.trim()]);
+  } else if (s.at_start !== "now") {
     p.push(["as", s.at_start], ["asv", s.at_start_value.trim()]);
     if (s.at_start === "delay") p.push(["asu", s.at_start_unit]);
   }
@@ -62,13 +70,51 @@ function serialise(skip = []) {
     p.push(["ae", s.at_stop], ["aev", s.at_stop_value.trim()]);
     if (s.at_stop === "delay") p.push(["aeu", s.at_stop_unit]);
   }
-  p.push(...estimatePairs());
+  p.push(...estimatePairs(), ...fillPairs());
   if (list(s.hosts)) p.push(["h", list(s.hosts)]);
   if (list(s.ports)) p.push(["p", list(s.ports)]);
   if (list(s.nets)) p.push(["net", list(s.nets)]);
   if (s.proto) p.push(["pr", s.proto]);
   if (s.raw.trim()) p.push(["q", s.raw.trim()]);
-  return p.filter(([k]) => !skip.includes(k)).map(([k, v]) => `${k}=${enc(v)}`).join("&");
+  return p.filter(([k]) => !skip.includes(k)).map(([k, v]) => `${enc(k)}=${enc(v)}`).join("&");
+}
+
+// Values typed in for placeholders, keyed "ph.<name>".
+function fillPairs() {
+  return Object.entries(state.fills).filter(([, v]) => v.trim()).map(([name, v]) => [`ph.${name}`, v.trim()]);
+}
+
+let fillKey = null; // which placeholders the fill-in panel currently shows
+
+// The panel at the top listing each placeholder with a box to fill it in.
+// It is rebuilt only when the set of placeholders changes, so typing in it
+// (or in the settings) never steals focus.
+function showPlaceholders(placeholders) {
+  const key = placeholders.map((p) => p.name).join("|");
+  $("#fill").hidden = !placeholders.length;
+  if (key === fillKey) return;
+  fillKey = key;
+  $("#fill-fields").replaceChildren(...placeholders.map((p, i) =>
+    el("label", { class: "field", for: `ph-${i}` },
+      el("span", {}, el("code", { text: p.name }), ` ${p.hint}`),
+      el("input", {
+        id: `ph-${i}`, type: "text", value: state.fills[p.name] || "", spellcheck: false, autocapitalize: "off",
+        "data-name": p.name,
+        oninput: (e) => { state.fills[p.name] = e.target.value; changed(false); },
+      }))));
+}
+
+// Commands for listing and removing a queued or recurring capture.
+function showManage(out) {
+  $("#manage").hidden = !out.manage.length;
+  $("#schedule-summary").hidden = !out.schedule_summary;
+  $("#schedule-summary").textContent = out.schedule_summary || "";
+  $("#manage-list").replaceChildren(...out.manage.map((m) =>
+    el("li", {},
+      el("span", { text: m.label }),
+      el("div", { class: "manage-row" },
+        el("code", { text: m.command }),
+        el("button", { type: "button", text: "Copy", "aria-label": `Copy: ${m.label}`, onclick: (e) => copy(m.command, e.currentTarget) })))));
 }
 
 // Estimate inputs: only the ones that are filled in or differ from the default.
@@ -108,6 +154,7 @@ function showEstimate(est) {
 }
 
 function adopt(serverState) {
+  fillKey = null;
   state = {
     ...serverState,
     ifaces: serverState.ifaces.join(", "),
@@ -130,14 +177,26 @@ function changed(rerender) {
   timer = setTimeout(refresh, rerender ? 0 : 150);
 }
 
-function textField(id, label, key, hint) {
-  return el("label", { class: "field", for: id },
+// `token` is a placeholder such as "<interface>" that this field accepts;
+// a small button offers to leave the value open for whoever gets the link.
+function textField(id, label, key, hint, token, append) {
+  const field = el("label", { class: "field", for: id },
     el("span", { text: label }),
     el("input", {
       id, type: "text", value: state[key], placeholder: hint || "", spellcheck: false,
       autocapitalize: "off",
       oninput: (e) => { state[key] = e.target.value; changed(false); },
     }));
+  if (!token || state[key].includes(token)) return field;
+  return [field, el("button", {
+    type: "button", class: "chip leave-open", text: `Leave open as ${token}`,
+    title: "Whoever opens the link fills this in",
+    onclick: () => {
+      const current = state[key].trim();
+      state[key] = append && current ? `${current}, ${token}` : token;
+      changed(true);
+    },
+  })];
 }
 
 function check(id, label, key) {
@@ -172,14 +231,64 @@ function scheduleDefault(mode) {
 
 // One half of the schedule: mode radios plus the input that mode needs.
 // `which` is "at_start" or "at_stop"; `off` is the mode meaning "not scheduled".
+// The settings for a recurring capture: how often, and the job's name.
+function cronControls() {
+  const s = state;
+  const set = (key) => (e) => { s[key] = e.target.value; changed(false); };
+  const kinds = [["daily", "Every day"], ["weekdays", "On chosen days"], ["hours", "Every few hours"], ["custom", "Custom cron expression"]];
+  const days = [["1", "Mon"], ["2", "Tue"], ["3", "Wed"], ["4", "Thu"], ["5", "Fri"], ["6", "Sat"], ["0", "Sun"]];
+  const chosen = s.cron_days.split(",").filter(Boolean);
+  const timed = s.cron_kind === "daily" || s.cron_kind === "weekdays";
+  return [
+    el("div", { class: "radios", role: "radiogroup", "aria-label": "How often" }, kinds.map(([value, label]) =>
+      el("label", { class: "check", for: `cron_kind-${value}` },
+        el("input", { id: `cron_kind-${value}`, type: "radio", name: "cron_kind", checked: s.cron_kind === value, onchange: () => { s.cron_kind = value; changed(true); } }),
+        el("span", { text: label })))),
+    s.cron_kind === "weekdays" && el("div", { class: "field radios", id: "cron_days", role: "group", "aria-label": "Days of the week" }, days.map(([value, label]) =>
+      el("label", { class: "check", for: `cron_day-${value}` },
+        el("input", {
+          id: `cron_day-${value}`, type: "checkbox", checked: chosen.includes(value),
+          onchange: (e) => {
+            const next = new Set(chosen);
+            if (e.target.checked) next.add(value); else next.delete(value);
+            s.cron_days = [...next].sort().join(",");
+            changed(true);
+          },
+        }),
+        el("span", { text: label })))),
+    timed && el("label", { class: "field", for: "cron_time" },
+      el("span", { text: "Time (24-hour), in the time zone of the system running the capture" }),
+      el("input", { id: "cron_time", type: "time", value: s.cron_time, oninput: set("cron_time") })),
+    s.cron_kind === "hours" && el("label", { class: "field", for: "cron_hours" },
+      el("span", { text: "Run every this many hours, on the hour (1 to 23)" }),
+      el("input", { id: "cron_hours", type: "number", min: 1, max: 23, value: s.cron_hours, oninput: set("cron_hours") })),
+    s.cron_kind === "custom" && el("label", { class: "field", for: "cron_expr" },
+      el("span", { text: "Five fields: minute, hour, day of month, month, day of week" }),
+      el("input", { id: "cron_expr", type: "text", value: s.cron_expr, placeholder: "0 1 * * 1-5", spellcheck: false, oninput: set("cron_expr") })),
+    el("label", { class: "field", for: "cron_name" },
+      el("span", { text: "Job name, used for the script file. Give each recurring capture its own." }),
+      el("input", { id: "cron_name", type: "text", value: s.cron_name, spellcheck: false, autocapitalize: "off", oninput: set("cron_name") })),
+  ];
+}
+
 function scheduleControls(which, off, offLabel, legend) {
   const mode = state[which];
   const valueKey = `${which}_value`;
   const unitKey = `${which}_unit`;
-  const modes = [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"]];
+  const recurring = state.at_start === "cron";
+  const modes = which === "at_start"
+    ? [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"], ["cron", "Repeat (cron)"]]
+    : recurring
+      ? [[off, "Let each run end by itself"], ["delay", "A set time after each start"]]
+      : [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"]];
   const pick = (value) => {
     state[which] = value;
     state[valueKey] = scheduleDefault(value);
+    // A recurring capture can only be stopped by a delay after each start.
+    if (which === "at_start" && value === "cron" && state.at_stop !== "delay") {
+      state.at_stop = "none";
+      state.at_stop_value = "";
+    }
     changed(true);
   };
   const onValue = (e) => { state[valueKey] = e.target.value; changed(false); };
@@ -194,7 +303,7 @@ function scheduleControls(which, off, offLabel, legend) {
       el("input", { id: valueKey, type: "datetime-local", value: state[valueKey], oninput: onValue }));
   } else if (mode === "delay") {
     input = el("div", { class: "field delay" },
-      el("label", { for: valueKey }, el("span", { text: "Delay from when the command is pasted" })),
+      el("label", { for: valueKey }, el("span", { text: which === "at_stop" && recurring ? "How long each run lasts before it is stopped" : "Delay from when the command is pasted" })),
       el("div", { class: "pair" },
         el("input", { id: valueKey, type: "number", min: 1, value: state[valueKey], "aria-label": "Delay amount", oninput: onValue }),
         el("select", { id: unitKey, "aria-label": "Delay unit", onchange: (e) => { state[unitKey] = e.target.value; changed(false); } },
@@ -281,32 +390,35 @@ function renderForm() {
 
   const where = section("where", "Where to capture",
     t.cluster && radios("scope", "scope", [["node", "This node"], ["all", "All nodes"], ["nodes", "Selected nodes"]]),
-    t.cluster && s.scope === "nodes" && textField("nodes", "Node numbers", "nodes", t.cluster.nodes_hint),
+    t.cluster && s.scope === "nodes" && textField("nodes", "Node numbers", "nodes", t.cluster.nodes_hint, "<nodes>"),
     radios("iface_mode", "iface_mode", [["named", "Named interface(s)"], ...(canAll ? [["all", "All interfaces"]] : [])]),
-    s.iface_mode === "named" && textField("ifaces", "Interface(s), comma separated", "ifaces", t.interface_hint));
+    s.iface_mode === "named" && textField("ifaces", "Interface(s), comma separated", "ifaces", t.interface_hint, "<interface>"));
 
   const dirPreview = [t.output_dir, s.subdir.trim().replace(/^\/+|\/+$/g, ""), s.dated ? t.date_subdir : ""].filter(Boolean).join("/");
   const output = section("output", "Output",
     check("write", "Write packets to a file (off prints them to the screen)", "write"),
-    s.write && textField("subdir", `Subfolder under ${t.output_dir} (optional)`, "subdir", "e.g. a case number, NDMP, CIFS"),
+    s.write && textField("subdir", `Subfolder under ${t.output_dir} (optional)`, "subdir", "e.g. a case number, NDMP, CIFS", "<case number>"),
     s.write && check("dated", "Add a folder for today's date", "dated"),
     s.write && check("log", "Save tcpdump's messages to a .log file next to the capture", "log"),
     s.write && check("background", "Run in the background", "background"),
     s.write && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })));
 
   const schedule = section("schedule", "Schedule",
-    el("p", { class: "desc", text: "Queue the capture with the at command instead of starting it straight away, and optionally queue the stop as well." }),
+    el("p", { class: "desc", text: "Start the capture later with the at command, or repeat it with cron, instead of starting it straight away. The stop can be scheduled as well." }),
     scheduleControls("at_start", "now", "Start now", "Start"),
+    s.at_start === "cron" && cronControls(),
     scheduleControls("at_stop", "none", "Stop manually", "Stop"),
-    (s.at_start !== "now" || s.at_stop !== "none") && t.at_note && el("p", { class: "desc", text: t.at_note }));
+    s.at_start === "cron"
+      ? t.cron_note && el("p", { class: "desc", text: t.cron_note })
+      : (s.at_start !== "now" || s.at_stop !== "none") && t.at_note && el("p", { class: "desc", text: t.at_note }));
 
   const flags = section("options", "Options", visibleFlags().map(flagRow));
 
   const filter = section("filter", "Filter",
     el("p", { class: "desc", text: "Leave everything empty to capture all traffic. Hosts and networks are alternatives; the groups are combined with \"and\"." }),
-    textField("hosts", "Hosts", "hosts", "192.168.1.1, 192.168.1.2"),
-    textField("nets", "Networks", "nets", "172.26.0.0/16"),
-    textField("ports", "Ports or ranges", "ports", "445, 2049, 8000-8100"),
+    textField("hosts", "Hosts", "hosts", "192.168.1.1, 192.168.1.2", "<client IP address>", true),
+    textField("nets", "Networks", "nets", "172.26.0.0/16", "<network>", true),
+    textField("ports", "Ports or ranges", "ports", "445, 2049, 8000-8100", "<port>", true),
     config.filter.protocols.length > 0 && el("label", { class: "field", for: "proto" },
       el("span", { text: "Protocol" }),
       el("select", { id: "proto", onchange: (e) => { s.proto = e.target.value; changed(false); } },
@@ -329,7 +441,7 @@ function renderForm() {
 
 // ---- problems: flag the fields, offer a fix ---------------------------------
 
-const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value"];
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name"];
 let lastIssues = [];
 let pendingFix = null;
 
@@ -349,6 +461,10 @@ function markFields(issues) {
       const key = issue.field.slice(2);
       input = document.getElementById(`flag-${key}-value`) || document.getElementById(`flag-${key}`);
       anchor = input && input.closest(".flag-head");
+    } else if (issue.field.startsWith("ph.")) {
+      const name = issue.field.slice(3);
+      input = [...document.querySelectorAll("#fill-fields input")].find((i) => i.dataset.name === name);
+      anchor = input && input.closest(".field");
     } else if (FIELD_IDS.includes(issue.field)) {
       input = document.getElementById(issue.field);
       anchor = input && input.closest(".field");
@@ -422,6 +538,8 @@ function showOutput(out, keepText) {
   $("#issues").replaceChildren(...out.issues.map((i) => el("li", { class: i.level, text: i.message })));
   $("#fix").hidden = !out.issues.some((i) => i.level === "error");
   showEstimate(out.estimate);
+  showPlaceholders(out.placeholders);
+  showManage(out);
   markFields(out.issues);
   $("#stop").hidden = !out.stop_command;
   $("#stop-command").textContent = out.stop_command || "";
@@ -432,7 +550,7 @@ function showOutput(out, keepText) {
 async function parseCommand() {
   const text = $("#command").value;
   const seq = ++buildSeq;
-  const keep = [["t", state.target], ...estimatePairs()].map(([k, v]) => `${k}=${enc(v)}`).join("&");
+  const keep = [["t", state.target], ...estimatePairs(), ...fillPairs()].map(([k, v]) => `${enc(k)}=${enc(v)}`).join("&");
   const res = await fetch(`api/parse?${keep}`, { method: "POST", body: text });
   if (!res.ok) throw new Error(`api/parse: ${res.status}`);
   const result = await res.json();

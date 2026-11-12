@@ -17,7 +17,7 @@ pub struct Issue {
 }
 
 /// The resolved form state, sent back so the page can fill itself in.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct State {
     pub target: String,
     pub scope: String,
@@ -51,6 +51,31 @@ pub struct State {
     pub est_ifaces: String,
     pub link_speed: String,
     pub free_space: String,
+    /// Recurring capture (start mode "cron"): kind is "daily", "weekdays",
+    /// "hours" or "custom".
+    pub cron_kind: String,
+    pub cron_time: String,
+    pub cron_days: String,
+    pub cron_hours: String,
+    pub cron_expr: String,
+    pub cron_name: String,
+    /// Values typed in for placeholders, keyed by the placeholder (`<interface>`).
+    pub fills: BTreeMap<String, String>,
+}
+
+/// A placeholder in the settings and what has been filled in for it.
+#[derive(Debug, Serialize)]
+pub struct Placeholder {
+    pub name: String,
+    pub hint: &'static str,
+    pub value: String,
+}
+
+/// A command for looking after a scheduled capture.
+#[derive(Debug, Serialize)]
+pub struct Manage {
+    pub label: &'static str,
+    pub command: String,
 }
 
 /// The capture size estimate, already worded for display.
@@ -71,6 +96,10 @@ pub struct Output {
     pub stop_command: Option<String>,
     pub issues: Vec<Issue>,
     pub estimate: Option<Estimate>,
+    pub placeholders: Vec<Placeholder>,
+    /// One line saying when a scheduled capture runs.
+    pub schedule_summary: Option<String>,
+    pub manage: Vec<Manage>,
     pub state: State,
 }
 
@@ -137,11 +166,154 @@ fn render(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
+/// A value left for the person running the command to fill in: `<interface>`.
+pub fn is_placeholder(s: &str) -> bool {
+    let inner = s.strip_prefix('<').and_then(|r| r.strip_suffix('>')).unwrap_or("");
+    !inner.trim().is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || " _-".contains(c))
+}
+
+/// Split on whitespace (and commas, if asked), keeping `<a placeholder>` whole.
+pub fn split_atoms(s: &str, commas: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let (mut cur, mut inside) = (String::new(), false);
+    for c in s.chars() {
+        inside |= c == '<';
+        if !inside && (c.is_whitespace() || (commas && c == ',')) {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+        inside &= c != '>';
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 fn split_list(s: &str) -> Vec<String> {
-    s.split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect()
+    split_atoms(s, true)
+}
+
+/// Every placeholder that appears in `s`, in order.
+fn placeholders_in(s: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('<') {
+        match rest[start..].find('>') {
+            Some(len) => {
+                let token = &rest[start..=start + len];
+                if is_placeholder(token) {
+                    found.push(token.to_string());
+                }
+                rest = &rest[start + len + 1..];
+            }
+            None => break,
+        }
+    }
+    found
+}
+
+fn replace_placeholders(s: &str, fills: &BTreeMap<String, String>) -> String {
+    placeholders_in(s).iter().fold(s.to_string(), |text, token| match fills.get(token) {
+        Some(value) => text.replace(token.as_str(), value),
+        None => text,
+    })
+}
+
+/// Where a placeholder sits, which decides what may be filled into it.
+#[derive(Clone, Copy, PartialEq)]
+enum Use {
+    Iface,
+    Nodes,
+    Subdir,
+    Host,
+    Net,
+    Port,
+    Raw,
+}
+
+impl Use {
+    fn label(self) -> &'static str {
+        match self {
+            Use::Iface => "Interface name, or several separated by commas",
+            Use::Nodes => "Node numbers, e.g. 1,2 or 1-4",
+            Use::Subdir => "Subfolder name",
+            Use::Host => "Host name or IP address, or several separated by commas",
+            Use::Net => "Network, e.g. 172.26.0.0/16",
+            Use::Port => "Port or port range, e.g. 445 or 8000-8100",
+            Use::Raw => "Filter text",
+        }
+    }
+}
+
+/// Placeholders in the settings that are actually used by the command.
+fn placeholder_uses(st: &State) -> Vec<(String, Use)> {
+    let mut uses = Vec::new();
+    let mut list = |items: &[String], kind: Use| uses.extend(items.iter().filter(|i| is_placeholder(i)).map(|i| (i.clone(), kind)));
+    if st.iface_mode == "named" {
+        list(&st.ifaces, Use::Iface);
+    }
+    list(&st.hosts, Use::Host);
+    list(&st.nets, Use::Net);
+    list(&st.ports, Use::Port);
+    if st.scope == "nodes" {
+        uses.extend(placeholders_in(&st.nodes).into_iter().map(|p| (p, Use::Nodes)));
+    }
+    if st.write {
+        uses.extend(placeholders_in(&st.subdir).into_iter().map(|p| (p, Use::Subdir)));
+    }
+    uses.extend(placeholders_in(&st.raw).into_iter().map(|p| (p, Use::Raw)));
+    uses
+}
+
+/// Why `value` cannot go where the placeholder is, if it cannot.
+fn fill_problem(value: &str, kind: Use) -> Option<&'static str> {
+    let each = |ok: fn(&str) -> bool| {
+        let items = split_list(value);
+        !items.is_empty() && items.iter().all(|i| ok(i) && !is_placeholder(i))
+    };
+    let fine = match kind {
+        Use::Iface => each(valid_iface),
+        Use::Host => each(valid_host),
+        Use::Net => each(valid_net),
+        Use::Port => each(valid_port),
+        Use::Nodes => valid_nodes(value) && !is_placeholder(value),
+        Use::Subdir => valid_subdir(value) && !value.contains('<'),
+        Use::Raw => {
+            let mut probe = Ctx { issues: Vec::new() };
+            check_raw_filter(value, &mut probe);
+            probe.issues.is_empty() && !value.contains('<')
+        }
+    };
+    (!fine).then_some(match kind {
+        Use::Iface => "Enter an interface name such as lagg0, or several separated by commas.",
+        Use::Host => "Enter a host name or IP address, or several separated by commas.",
+        Use::Net => "Enter a network such as 172.26.0.0/16.",
+        Use::Port => "Enter a port or a range such as 445 or 8000-8100.",
+        Use::Nodes => "Enter node numbers such as 1,2 or 1-4.",
+        Use::Subdir => "Use only letters, digits and _ . - / here.",
+        Use::Raw => "That text cannot be used in a filter.",
+    })
+}
+
+/// The settings with every usable fill-in value put in place of its placeholder.
+fn with_fills(st: &State, fills: &BTreeMap<String, String>) -> State {
+    let expand = |items: &[String]| -> Vec<String> {
+        items.iter().flat_map(|i| fills.get(i).map_or_else(|| vec![i.clone()], |v| split_list(v))).collect()
+    };
+    State {
+        ifaces: expand(&st.ifaces),
+        hosts: expand(&st.hosts),
+        nets: expand(&st.nets),
+        ports: expand(&st.ports),
+        nodes: replace_placeholders(&st.nodes, fills),
+        subdir: replace_placeholders(&st.subdir, fills),
+        raw: replace_placeholders(&st.raw, fills),
+        ..st.clone()
+    }
 }
 
 fn all_chars(s: &str, extra: &str) -> bool {
@@ -149,6 +321,9 @@ fn all_chars(s: &str, extra: &str) -> bool {
 }
 
 fn valid_port(p: &str) -> bool {
+    if is_placeholder(p) {
+        return true;
+    }
     let ok = |x: &str| x.parse::<u16>().is_ok();
     match p.split_once('-') {
         Some((a, b)) => ok(a) && ok(b),
@@ -157,23 +332,93 @@ fn valid_port(p: &str) -> bool {
 }
 
 fn valid_iface(s: &str) -> bool {
-    all_chars(s, "_.:-")
+    is_placeholder(s) || all_chars(s, "_.:-")
 }
 
 fn valid_host(s: &str) -> bool {
-    all_chars(s, ".:-")
+    is_placeholder(s) || all_chars(s, ".:-")
 }
 
 fn valid_net(s: &str) -> bool {
-    all_chars(s, ".:/") && s.starts_with(|c: char| c.is_ascii_hexdigit())
+    is_placeholder(s) || (all_chars(s, ".:/") && s.starts_with(|c: char| c.is_ascii_hexdigit()))
 }
 
-fn valid_subdir(s: &str) -> bool {
-    all_chars(s, "_./-") && !s.split('/').any(|p| p == ".." || p.is_empty())
+pub fn valid_subdir(s: &str) -> bool {
+    !s.is_empty() && s.split('/').all(|p| is_placeholder(p) || (all_chars(p, "_.-") && p != ".."))
 }
 
 fn valid_nodes(s: &str) -> bool {
-    all_chars(s, ",-") && s.starts_with(|c: char| c.is_ascii_digit())
+    is_placeholder(s) || (all_chars(s, ",-") && s.starts_with(|c: char| c.is_ascii_digit()))
+}
+
+const CRON_DEFAULTS: [(&str, &str); 5] =
+    [("time", "01:00"), ("days", "1,2,3,4,5"), ("hours", "6"), ("expr", "0 1 * * *"), ("name", "capture")];
+
+fn valid_cron_name(s: &str) -> bool {
+    all_chars(s, "_-") && s.len() <= 32
+}
+
+/// The five-field cron expression for the repeat settings, or the field at
+/// fault and what is wrong with it.
+fn cron_expr(st: &State) -> Result<String, (&'static str, &'static str)> {
+    let clock = || -> Result<(u32, u32), (&'static str, &'static str)> {
+        match st.cron_time.split_once(':') {
+            Some((h, m)) if two_digits(h, 23) && two_digits(m, 59) => Ok((h.parse().unwrap_or(0), m.parse().unwrap_or(0))),
+            _ => Err(("cron_time", "Enter the time as HH:MM, for example 01:00.")),
+        }
+    };
+    match st.cron_kind.as_str() {
+        "daily" => clock().map(|(h, m)| format!("{m} {h} * * *")),
+        "weekdays" => {
+            let mut days: Vec<u32> = Vec::new();
+            for d in st.cron_days.split(',').filter(|d| !d.is_empty()) {
+                match d.parse::<u32>() {
+                    Ok(n) if n <= 6 => days.push(n),
+                    _ => return Err(("cron_days", "Pick at least one day of the week.")),
+                }
+            }
+            days.sort_unstable();
+            days.dedup();
+            if days.is_empty() {
+                return Err(("cron_days", "Pick at least one day of the week."));
+            }
+            let list: Vec<String> = days.iter().map(u32::to_string).collect();
+            clock().map(|(h, m)| format!("{m} {h} * * {}", list.join(",")))
+        }
+        "hours" => match st.cron_hours.parse::<u32>() {
+            Ok(n) if (1..=23).contains(&n) => Ok(format!("0 */{n} * * *")),
+            _ => Err(("cron_hours", "Enter a whole number of hours from 1 to 23.")),
+        },
+        _ => {
+            let fields: Vec<&str> = st.cron_expr.split_whitespace().collect();
+            let ok = fields.len() == 5 && fields.iter().all(|f| f.chars().all(|c| c.is_ascii_digit() || "*,/-".contains(c)));
+            if ok { Ok(fields.join(" ")) } else { Err(("cron_expr", "Enter five fields made of digits and * , / - (minute hour day month weekday), for example 0 1 * * 1-5.")) }
+        }
+    }
+}
+
+/// Say a cron expression in words, for the common shapes.
+fn describe_cron(expr: &str) -> String {
+    const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    let f: Vec<&str> = expr.split(' ').collect();
+    let num = |s: &str| s.parse::<u32>().ok();
+    match f[..] {
+        [m, h, "*", "*", dow] if num(m).is_some() && num(h).is_some() => {
+            let at = format!("{:02}:{:02}", num(h).unwrap_or(0), num(m).unwrap_or(0));
+            if dow == "*" {
+                return format!("Runs every day at {at}.");
+            }
+            let names: Option<Vec<&str>> = dow.split(',').map(|d| num(d).and_then(|n| DAYS.get(n as usize).copied())).collect();
+            match names {
+                Some(names) => format!("Runs at {at} on {}.", names.join(", ")),
+                None => format!("Runs on the schedule \"{expr}\"."),
+            }
+        }
+        ["0", h, "*", "*", "*"] if h.strip_prefix("*/").and_then(num).is_some() => {
+            format!("Runs every {} hours, on the hour.", &h[2..])
+        }
+        _ => format!("Runs on the schedule \"{expr}\" (minute hour day month weekday)."),
+    }
 }
 
 /// Wrap in double quotes when the shell would otherwise interpret something.
@@ -429,6 +674,38 @@ pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
         changes.push(format!("Protocol {:?} removed.", st.proto));
         st.proto.clear();
     }
+    // Fill-in values that cannot go where their placeholder is.
+    for (name, kind) in placeholder_uses(&st) {
+        if st.fills.get(&name).is_some_and(|v| fill_problem(v, kind).is_some()) {
+            changes.push(format!("The value entered for {name} ({:?}) removed.", st.fills[&name]));
+            st.fills.remove(&name);
+        }
+    }
+    if st.at_start == "cron" {
+        let default = |name: &str| CRON_DEFAULTS.iter().find(|d| d.0 == name).map_or("", |d| d.1).to_string();
+        let mut reset = false;
+        while let Err((field, _)) = cron_expr(&st) {
+            reset = true;
+            match field {
+                "cron_time" => st.cron_time = default("time"),
+                "cron_days" => st.cron_days = default("days"),
+                "cron_hours" => st.cron_hours = default("hours"),
+                _ => st.cron_expr = default("expr"),
+            }
+        }
+        if reset {
+            changes.push("The repeat schedule was not valid; the invalid part was reset to its default.".into());
+        }
+        if !valid_cron_name(&st.cron_name) {
+            changes.push(format!("Job name {:?} changed to \"capture\".", st.cron_name));
+            st.cron_name = default("name");
+        }
+        if matches!(st.at_stop.as_str(), "time" | "date") {
+            changes.push("A recurring capture can only stop after a delay; changed to \"Stop manually\".".into());
+            st.at_stop = "none".into();
+            st.at_stop_value.clear();
+        }
+    }
     if at_spec(&st.at_start, &st.at_start_value, &st.at_start_unit).is_err() {
         changes.push("The start schedule is not valid; changed to \"Start now\".".into());
         st.at_start = "now".into();
@@ -496,7 +773,11 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
         ifaces.push(target.default_interface.clone());
     }
 
-    State {
+    let or_default = |key: &str, name: &str| match get(key).trim() {
+        "" => CRON_DEFAULTS.iter().find(|d| d.0 == name).map_or("", |d| d.1).to_string(),
+        given => given.to_string(),
+    };
+    let mut st = State {
         target: target.id.clone(),
         scope: scope.into(),
         nodes: get("n").trim().to_string(),
@@ -514,7 +795,7 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
         proto: get("pr").to_string(),
         raw: get("q").to_string(),
         at_start: match get("as") {
-            m @ ("time" | "date" | "delay") => m.to_string(),
+            m @ ("time" | "date" | "delay" | "cron") => m.to_string(),
             _ => "now".to_string(),
         },
         at_start_value: get("asv").trim().to_string(),
@@ -532,7 +813,24 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
             given => given.to_string(),
         },
         free_space: get("fs").trim().to_string(),
+        cron_kind: match get("ck") {
+            k @ ("weekdays" | "hours" | "custom") => k.to_string(),
+            _ => "daily".to_string(),
+        },
+        cron_time: or_default("ct", "time"),
+        cron_days: or_default("cd", "days"),
+        cron_hours: or_default("ch", "hours"),
+        cron_expr: or_default("cx", "expr"),
+        cron_name: or_default("cn", "name"),
+        fills: BTreeMap::new(),
+    };
+    // Keep only fill-in values whose placeholder is still in the settings.
+    for (name, _) in placeholder_uses(&st) {
+        if let Some(value) = q.get(format!("ph.{name}").as_str()).map(|v| v.trim()).filter(|v| !v.is_empty()) {
+            st.fills.insert(name, value.to_string());
+        }
     }
+    st
 }
 
 pub const AT_UNITS: [&str; 3] = ["minutes", "hours", "days"];
@@ -770,7 +1068,29 @@ fn target_of<'a>(cfg: &'a Config, st: &State) -> &'a Target {
 }
 
 /// Validate the state and write the command.
-fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
+fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
+    // Placeholders: check what was filled in, then build from the settings
+    // with the usable values in place. `raw` keeps the placeholders for the form.
+    let uses = placeholder_uses(&raw);
+    let mut usable = raw.fills.clone();
+    for (name, kind) in &uses {
+        if let Some(problem) = raw.fills.get(name).and_then(|v| fill_problem(v, *kind)) {
+            if usable.remove(name).is_some() {
+                cx.error(&format!("ph.{name}"), problem);
+            }
+        }
+    }
+    let mut placeholders: Vec<Placeholder> = Vec::new();
+    for (name, kind) in &uses {
+        if !placeholders.iter().any(|p| &p.name == name) {
+            placeholders.push(Placeholder { name: name.clone(), hint: kind.label(), value: raw.fills.get(name).cloned().unwrap_or_default() });
+        }
+    }
+    let unfilled: Vec<&str> = placeholders.iter().filter(|p| !usable.contains_key(&p.name)).map(|p| p.name.as_str()).collect();
+    if !unfilled.is_empty() {
+        cx.warn("placeholders", format!("Fill in {} before running this command.", unfilled.join(", ")));
+    }
+    let st = with_fills(&raw, &usable);
     let target = target_of(cfg, &st);
     let scope = st.scope.clone();
     let scope = scope.as_str();
@@ -878,10 +1198,17 @@ fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
         cx.error("at_start_value", e);
         None
     });
+    let is_cron = st.at_start == "cron";
     let stop_spec = at_spec(&st.at_stop, &st.at_stop_value, &st.at_stop_unit).unwrap_or_else(|e| {
         cx.error("at_stop_value", e);
         None
     });
+    // A recurring capture has no `at` jobs; its stop is a delay inside the script.
+    let stop_delay = stop_spec.as_ref().filter(|_| is_cron).and_then(|_| delay_minutes(&st.at_stop_value, &st.at_stop_unit));
+    if is_cron && stop_spec.is_some() && st.at_stop != "delay" {
+        cx.error("at_stop_value", "A recurring capture can only be stopped by a delay after each start.");
+    }
+    let stop_spec = stop_spec.filter(|_| !is_cron);
     let stop_plain = wrap(&target.stop, &mut cx);
     let job = |spec: &str, body: &str| format!("{} {spec} <<'EOF'\n{body}\nEOF", target.at_command);
     if let Some(spec) = &start_spec {
@@ -904,7 +1231,47 @@ fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
             cx.warn("at_stop_value", "The stop is scheduled at or before the start, so the capture would not be stopped.");
         }
     }
-    let stop_command = (background || start_spec.is_some() || stop_spec.is_some()).then_some(stop_plain);
+    let mut manage: Vec<Manage> = Vec::new();
+    let mut schedule_summary = None;
+    if start_spec.is_some() || stop_spec.is_some() {
+        manage.push(Manage { label: "List the queued jobs and their numbers", command: target.at_list.clone() });
+        manage.push(Manage { label: "Show what a queued job will run", command: target.at_show.clone() });
+        manage.push(Manage { label: "Remove a queued job", command: target.at_remove.clone() });
+    }
+    if is_cron {
+        let expr = cron_expr(&st).unwrap_or_else(|(field, message)| {
+            cx.error(field, message);
+            String::new()
+        });
+        if !valid_cron_name(&st.cron_name) {
+            cx.error("cron_name", "Use only letters, digits, _ and - for the job name.");
+        }
+        let cron_dir = target.cron_dir.clone().unwrap_or_else(|| target.output_dir.clone());
+        let script = format!("{cron_dir}/tcpdump_{}.sh", st.cron_name);
+        // The stop timer goes first so it is running even if the capture stays in the foreground.
+        let body = match stop_delay {
+            Some(minutes) => format!("(sleep {}; {stop_plain}) &\n{cmd}", minutes * 60),
+            None => cmd.clone(),
+        };
+        cmd = render(&target.cron_install, &[("dir", &cron_dir), ("script", &script), ("expr", &expr), ("command", &body)]);
+        if !st.write {
+            cx.warn("at_start_value", "A scheduled capture has no screen to print to; turn on \"Write packets to a file\".");
+        }
+        let role = |r: Role| cfg.flags.iter().find(|f| f.role == Some(r)).is_some_and(|f| st.flags.contains_key(f.key()));
+        let ends = role(Role::PacketCount) || (role(Role::RotateSeconds) && role(Role::FileCount) && !role(Role::FileSizeMb));
+        if !ends && stop_delay.is_none() {
+            cx.warn("cron", "This capture does not end by itself, so every run would start another one on top of it. Rotate by time with a file count, set a packet count, or add a stop delay.");
+        }
+        if st.write {
+            cx.warn("cron", "A recurring capture adds files on every run and can fill the drive over time. Delete old captures regularly, and remove the cron job when you are done.");
+        }
+        if !expr.is_empty() {
+            schedule_summary = Some(describe_cron(&expr));
+        }
+        manage.push(Manage { label: "List the cron jobs", command: target.cron_list.clone() });
+        manage.push(Manage { label: "Remove this recurring capture", command: render(&target.cron_remove, &[("script", &script)]) });
+    }
+    let stop_command = (background || is_cron || start_spec.is_some() || stop_spec.is_some()).then_some(stop_plain);
 
     check_estimate_inputs(cfg, &st, &mut cx);
     let failed = cx.issues.iter().any(|i| i.level == "error");
@@ -914,7 +1281,10 @@ fn write_command(cfg: &Config, st: State, mut cx: Ctx) -> Output {
         stop_command: if failed { None } else { stop_command },
         issues: cx.issues,
         estimate,
-        state: st,
+        placeholders,
+        schedule_summary: schedule_summary.filter(|_| !failed),
+        manage: if failed { Vec::new() } else { manage },
+        state: raw,
     }
 }
 
@@ -1133,6 +1503,94 @@ mod tests {
             let f = fix(&cfg(), &parse_query(q));
             assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}");
             assert!(!f.output.command.contains("at "), "{q}");
+        }
+    }
+
+    #[test]
+    fn placeholders_stay_in_the_command_until_filled() {
+        let q = "v=1&sc=nodes&n=<nodes>&if=<interface>&w=1&sd=<case number>&bg=1&f.s=600&f.C=500&f.W=5&h=<client IP address>";
+        let o = run(q);
+        assert!(errors(&o).is_empty(), "{:?}", o.issues);
+        assert!(o.command.contains("isi_for_array -n<nodes> 'tcpdump -i <interface> "));
+        assert!(o.command.contains("/ifs/data/Isilon_Support/<case number>/$(date +%F)/") && o.command.contains("\"host <client IP address>\""));
+        assert_eq!(o.placeholders.len(), 4);
+        assert!(warnings(&o).iter().any(|w| w.starts_with("Fill in <interface>, <client IP address>, <nodes>, <case number>")));
+        // The settings keep the placeholders so the link can be passed on again.
+        assert_eq!(o.state.ifaces, ["<interface>"]);
+    }
+
+    #[test]
+    fn filled_placeholders_are_substituted_and_checked() {
+        let q = "v=1&sc=nodes&n=<nodes>&if=<interface>&w=1&sd=<case number>&bg=1&f.s=600&f.C=500&f.W=5&h=<client IP address>";
+        let filled = format!("{q}&ph.<interface>=bxe0, bxe1&ph.<nodes>=1-3&ph.<case number>=SR12345&ph.<client IP address>=10.0.0.5");
+        let o = run(&filled);
+        assert!(errors(&o).is_empty() && !warnings(&o).iter().any(|w| w.contains("Fill in")), "{:?}", o.issues);
+        assert!(o.command.contains("isi_for_array -n1-3 'for iface in bxe0 bxe1; do tcpdump -i ${iface} "));
+        assert!(o.command.contains("/Isilon_Support/SR12345/") && o.command.contains(" host 10.0.0.5 ") && !o.command.contains('<'));
+        // Two interfaces on three nodes are counted from the filled-in values.
+        assert_eq!(o.estimate.as_ref().unwrap().headline, "Up to 15.0 GB");
+        assert_eq!((o.state.ifaces[0].as_str(), o.state.fills["<interface>"].as_str()), ("<interface>", "bxe0, bxe1"));
+
+        // A bad value is reported against the placeholder, and never reaches the command.
+        for bad in ["ph.<interface>=eth0;reboot", "ph.<client IP address>=$(id)", "ph.<nodes>=1;id", "ph.<case number>=../x", "ph.<interface>=<other>"] {
+            let o = run(&format!("{q}&{bad}"));
+            assert!(o.issues.iter().any(|i| i.level == "error" && i.field.starts_with("ph.<")), "{bad}");
+            assert!(o.command.is_empty(), "{bad}");
+            let f = fix(&cfg(), &parse_query(&format!("{q}&{bad}")));
+            assert!(errors(&f.output).is_empty() && f.changes.len() == 1, "{bad}: {:?}", f.changes);
+            assert!(f.output.command.contains("<interface>") || f.output.command.contains("<client IP address>"));
+        }
+        // A fill for a placeholder that is no longer in the settings is dropped.
+        assert!(run("v=1&if=lagg0&ph.<interface>=bxe0").state.fills.is_empty());
+    }
+
+    #[test]
+    fn recurring_capture_installs_a_script_and_a_crontab_line() {
+        let o = run("v=1&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=300&f.W=2&as=cron&ck=weekdays&ct=01:30&cd=5,1,1&cn=nightly");
+        assert!(errors(&o).is_empty(), "{:?}", o.issues);
+        let lines: Vec<&str> = o.command.lines().collect();
+        assert_eq!(lines[0], "mkdir -p /ifs/data/Isilon_Support");
+        assert_eq!(lines[1], "cat > /ifs/data/Isilon_Support/tcpdump_nightly.sh <<'EOF'");
+        assert_eq!(lines[2], "#!/bin/sh");
+        assert!(lines[3].contains("tcpdump -i lagg0") && lines[3].contains("%F_%H%M%S") && lines[3].contains(".log 2>&1 &"));
+        assert_eq!((lines[4], lines[5]), ("EOF", "chmod +x /ifs/data/Isilon_Support/tcpdump_nightly.sh"));
+        assert_eq!(lines[6], "(crontab -l 2>/dev/null | grep -v '/ifs/data/Isilon_Support/tcpdump_nightly.sh'; echo '30 1 * * 1,5 /ifs/data/Isilon_Support/tcpdump_nightly.sh') | crontab -");
+        assert_eq!(o.schedule_summary.as_deref(), Some("Runs at 01:30 on Monday, Friday."));
+        assert_eq!(o.manage.len(), 2);
+        assert!(o.manage[1].command.contains("grep -v '/ifs/data/Isilon_Support/tcpdump_nightly.sh'") && o.manage[1].command.contains("rm -f"));
+        // It ends by itself (-G with -W), so the only warning is about files piling up.
+        assert_eq!(warnings(&o).len(), 1, "{:?}", o.issues);
+
+        let o = run("v=1&t=linux&w=1&f.C=500&f.W=5&as=cron&ck=hours&ch=6&ae=delay&aev=30&aeu=minutes");
+        assert!(o.command.starts_with("sudo tee /usr/local/sbin/tcpdump_capture.sh >/dev/null <<'EOF'\n#!/bin/sh\n(sleep 1800; sudo pkill -INT tcpdump) &\n"));
+        assert!(o.command.contains("echo '0 */6 * * * /usr/local/sbin/tcpdump_capture.sh') | sudo crontab -"));
+        // A ring buffer never ends: warned unless a stop delay is set.
+        let o = run("v=1&w=1&f.C=500&f.W=5&as=cron&ck=daily");
+        assert!(warnings(&o).iter().any(|w| w.contains("does not end by itself")));
+    }
+
+    #[test]
+    fn at_jobs_come_with_list_and_remove_commands() {
+        let o = run("v=1&w=1&f.C=500&f.W=5&as=time&asv=01:00");
+        let commands: Vec<&str> = o.manage.iter().map(|m| m.command.as_str()).collect();
+        assert_eq!(commands, ["atq", "at -c <job number>", "atrm <job number>"]);
+        let o = run("v=1&t=linux&w=1&f.C=500&f.W=5&ae=delay&aev=2&aeu=hours");
+        assert_eq!(o.manage[0].command, "sudo atq");
+        assert!(run("v=1&w=1&f.C=500&f.W=5").manage.is_empty());
+    }
+
+    #[test]
+    fn cron_values_are_validated_and_fixable() {
+        for q in [
+            "as=cron&ck=daily&ct=25:00", "as=cron&ck=weekdays&cd=7", "as=cron&ck=weekdays&cd=x&ct=bad", "as=cron&ck=hours&ch=0",
+            "as=cron&ck=custom&cx=* * * *", "as=cron&ck=custom&cx=0 1 * * *; reboot", "as=cron&ck=custom&cx=0 1 * * $(id)",
+            "as=cron&cn=a/b", "as=cron&cn=x;id", "as=cron&ae=time&aev=05:00",
+        ] {
+            let o = run(q);
+            assert!(!errors(&o).is_empty() && o.command.is_empty(), "{q}");
+            let f = fix(&cfg(), &parse_query(q));
+            assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}: {:?}", f.output.issues);
+            assert!(!f.output.command.contains("reboot") && !f.output.command.contains("$(id)") && !f.output.command.contains(";id"));
         }
     }
 

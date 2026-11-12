@@ -29,6 +29,11 @@
     </nav>
     <p id="side-links" class="links" hidden></p>
   </header>
+  <section id="fill" aria-labelledby="fill-title" hidden>
+    <h2 id="fill-title">Fill in before running</h2>
+    <p class="note">This command has values left open. Enter yours here and the command updates. The settings below keep the placeholders, so the link can be shared again.</p>
+    <div id="fill-fields"></div>
+  </section>
   <form id="form" autocomplete="off" novalidate></form>
   <aside id="result" aria-live="polite">
     <div class="result-head">
@@ -55,6 +60,11 @@
       <pre id="stop-command" tabindex="0"></pre>
     </div>
     <p id="stop-note" class="note" hidden>The capture runs in the foreground. Press Ctrl-C to stop it.</p>
+    <section id="manage" aria-labelledby="manage-title" hidden>
+      <h3 id="manage-title">Looking after the scheduled capture</h3>
+      <p id="schedule-summary" class="note" hidden></p>
+      <ul id="manage-list"></ul>
+    </section>
     <section id="estimate" aria-labelledby="estimate-title" hidden>
       <h3 id="estimate-title">Capture size estimate</h3>
       <p id="est-headline"></p>

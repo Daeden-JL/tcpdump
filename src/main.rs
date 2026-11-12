@@ -131,8 +131,8 @@ async fn api_parse(State(app): State<Arc<App>>, RawQuery(query): RawQuery, body:
     let hint = given.iter().find(|(k, _)| k == "t").map(|(_, v)| v.clone()).unwrap_or_default();
     no_cache(Json(match parse::parse(&cfg, &body, &hint) {
         Some(mut parsed) => {
-            // The estimate inputs are not part of a command, so carry them over.
-            parsed.pairs.extend(given.into_iter().filter(|(k, _)| ["en", "ei", "ls", "fs"].contains(&k.as_str())));
+            // Estimate inputs and fill-in values are not part of a command, so carry them over.
+            parsed.pairs.extend(given.into_iter().filter(|(k, _)| ["en", "ei", "ls", "fs"].contains(&k.as_str()) || k.starts_with("ph.")));
             json!({ "found": true, "notes": parsed.notes, "output": builder::build(&cfg, &parsed.pairs) })
         }
         None => json!({ "found": false }),

@@ -92,6 +92,16 @@ default_link_speed_gbit = 10
 # Scheduling: `at_command` queues the job, `at_log_redirect` replaces
 # `log_redirect` inside a job (jobs run under /bin/sh), and `at_note` is shown
 # next to the schedule settings.
+#
+# Recurring captures: `cron_install` writes the capture into a script and
+# adds one crontab line ({dir} {script} {expr} {command}); `cron_remove`
+# undoes it ({script}); `cron_dir` is where the script goes (default:
+# output_dir). `at_list`, `at_show`, `at_remove` and `cron_list` are the
+# commands shown for looking after a scheduled capture.
+#
+# Placeholders: interfaces, node numbers, the subfolder, hosts, networks and
+# ports may be given as <a name> (for example <interface>). The page then
+# asks whoever opens the link to fill them in.
 # ---------------------------------------------------------------------------
 
 [[targets]]
@@ -111,7 +121,8 @@ background_default = true
 stop = "killall -SIGINT tcpdump"
 at_command = "at"
 at_log_redirect = ">> {log} 2>&1"
-at_note = "The job is queued on the node where you paste the command and runs there under /bin/sh. On FreeBSD-based systems queued jobs are started by a periodic task, so the capture can begin up to five minutes after the set time. List queued jobs with atq and remove one with atrm."
+at_note = "The job is queued on the node where you paste the command and runs there under /bin/sh. On FreeBSD-based systems queued jobs are started by a periodic task, so the capture can begin up to five minutes after the set time."
+cron_note = "The cron job is added for the user and on the node where you paste the command; the script is on /ifs, so any node can read it. Cron runs the script under /bin/sh."
 default_interface = "lagg0"
 interface_hint = "e.g. lagg0, or several: bxe0, bxe1"
 all_interfaces = '`ifconfig | grep -B2 ether | grep flags | cut -d: -f1`'
@@ -131,7 +142,21 @@ hostname = "$(hostname -s)"
 log_redirect = ">> {log} 2>&1"
 stop = "sudo pkill -INT tcpdump"
 at_command = "sudo at"
-at_note = "Needs the at package with atd running. The job is queued as root, so the capture folder ~ is root's home. List queued jobs with sudo atq and remove one with sudo atrm."
+at_note = "Needs the at package with atd running. The job is queued as root, so the capture folder ~ is root's home."
+at_list = "sudo atq"
+at_show = "sudo at -c <job number>"
+at_remove = "sudo atrm <job number>"
+cron_dir = "/usr/local/sbin"
+cron_install = """
+sudo tee {script} >/dev/null <<'EOF'
+#!/bin/sh
+{command}
+EOF
+sudo chmod +x {script}
+(sudo crontab -l 2>/dev/null | grep -v '{script}'; echo '{expr} {script}') | sudo crontab -"""
+cron_remove = "sudo crontab -l | grep -v '{script}' | sudo crontab -; sudo rm -f {script}"
+cron_list = "sudo crontab -l"
+cron_note = "The cron job is added to root's crontab, so the capture folder ~ is root's home."
 default_interface = "eth0"
 interface_hint = "e.g. eth0, ens192, bond0"
 any_interface = "any"
@@ -374,6 +399,14 @@ label = "NDMP"
 expression = "port 10000"
 
 [[filter.snippets]]
+label = "LLDP"
+expression = "ether[12:2]=0x88cc"
+
+[[filter.snippets]]
+label = "CDP"
+expression = "ether[20:2]=0x2000"
+
+[[filter.snippets]]
 label = "TCP SYN / RST only"
 expression = "tcp[13] & 6 != 0"
 
@@ -385,8 +418,8 @@ expression = "tcp[13] & 6 != 0"
 
 [[examples]]
 title = "Timed capture, one interface"
-description = "One interface on this node for 4 hours in 1-hour files, filtered to one client."
-query = "v=1&t=powerscale&sc=node&im=named&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=3600&f.W=4&h=192.168.1.1"
+description = "One interface on this node for 4 hours in 1-hour files, filtered to one client. The interface and client are left as placeholders to fill in."
+query = "v=1&t=powerscale&sc=node&im=named&if=<interface>&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=3600&f.W=4&h=<client IP address>"
 
 [[examples]]
 title = "Timed capture, two interfaces on two nodes"
@@ -422,6 +455,16 @@ query = "v=1&t=powerscale&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5
 title = "One node, one subnet, larger buffer"
 description = "Node 17 only, whole packets, filtered to a subnet, with a large capture buffer."
 query = "v=1&t=powerscale&sc=nodes&n=17&im=named&if=lagg0&w=1&dd=1&lg=0&bg=1&f.s=0&f.C=500&f.W=10&f.B=65536&net=172.26.0.0/16"
+
+[[examples]]
+title = "LLDP or CDP: which switch port is this interface on?"
+description = "Prints the next LLDP or CDP announcement seen on one interface, in full, then stops. Switches send these every 30 to 60 seconds, so allow up to a minute."
+query = "v=1&t=powerscale&sc=node&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
+
+[[examples]]
+title = "LLDP or CDP on every node"
+description = "The same check on one interface of every node, to map each node to its switch port."
+query = "v=1&t=powerscale&sc=all&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
 
 [[examples]]
 title = "Linux: watch DNS live"

@@ -218,6 +218,26 @@ pub struct Target {
     /// Shown next to the schedule settings.
     #[serde(default)]
     pub at_note: String,
+    /// Commands shown for managing queued `at` jobs.
+    #[serde(default = "d_at_list")]
+    pub at_list: String,
+    #[serde(default = "d_at_show")]
+    pub at_show: String,
+    #[serde(default = "d_at_remove")]
+    pub at_remove: String,
+    /// Folder the cron script is written to. Defaults to `output_dir`.
+    #[serde(default)]
+    pub cron_dir: Option<String>,
+    /// Installs a recurring capture: {dir} {script} {expr} {command}.
+    #[serde(default = "d_cron_install")]
+    pub cron_install: String,
+    /// Removes it again: {script}.
+    #[serde(default = "d_cron_remove")]
+    pub cron_remove: String,
+    #[serde(default = "d_cron_list")]
+    pub cron_list: String,
+    #[serde(default)]
+    pub cron_note: String,
     pub default_interface: String,
     #[serde(default)]
     pub interface_hint: String,
@@ -368,6 +388,24 @@ fn d_prepare() -> String {
 }
 fn d_log_redirect() -> String {
     ">> {log} 2>&1".into()
+}
+fn d_at_list() -> String {
+    "atq".into()
+}
+fn d_at_show() -> String {
+    "at -c <job number>".into()
+}
+fn d_at_remove() -> String {
+    "atrm <job number>".into()
+}
+fn d_cron_install() -> String {
+    "mkdir -p {dir}\ncat > {script} <<'EOF'\n#!/bin/sh\n{command}\nEOF\nchmod +x {script}\n(crontab -l 2>/dev/null | grep -v '{script}'; echo '{expr} {script}') | crontab -".into()
+}
+fn d_cron_remove() -> String {
+    "crontab -l | grep -v '{script}' | crontab -; rm -f {script}".into()
+}
+fn d_cron_list() -> String {
+    "crontab -l".into()
 }
 fn d_at_command() -> String {
     "at".into()
