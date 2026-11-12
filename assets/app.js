@@ -201,6 +201,7 @@ function textField(id, label, key, hint, token, append) {
       oninput: (e) => {
         state[key] = e.target.value;
         if (toggle) toggle.checked = hasPlaceholder(state[key]);
+        if (key === "raw") markSnippets();
         changed(false);
       },
     }));
@@ -348,6 +349,38 @@ function scheduleControls(which, off, offLabel, legend) {
   ];
 }
 
+// Matches a filter shortcut's expression as a whole term of the filter, so
+// "port 53" is not found inside "port 530".
+function snippetPattern(expression) {
+  const literal = expression.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(^|[\\s(])${literal}(?=$|[\\s)])`);
+}
+
+// A filter shortcut is a switch: add its expression if it is not in the
+// filter yet, take it out if it is. Clicking twice never doubles it up.
+function toggleSnippet(raw, expression) {
+  const text = raw.trim();
+  const pattern = snippetPattern(expression);
+  if (!pattern.test(text)) return text ? `${text} or ${expression}` : expression;
+  // Remove it, then tidy the "or" it leaves at an edge or doubled in the middle.
+  return text.replace(pattern, "$1")
+    .replace(/\s+/g, " ")
+    .replace(/\bor( or)+\b/g, "or")
+    .replace(/^\s*or\s+|\s+or\s*$/g, "")
+    .replace(/\(\s*or\s+/g, "(")
+    .replace(/\s+or\s*\)/g, ")")
+    .trim();
+}
+
+// Keep the shortcut highlights in step with what is typed in the filter box.
+function markSnippets() {
+  for (const chip of document.querySelectorAll("#snippets .chip")) {
+    const on = snippetPattern(chip.dataset.expression).test(state.raw);
+    chip.classList.toggle("active", on);
+    chip.setAttribute("aria-pressed", String(on));
+  }
+}
+
 function flagRow(f) {
   const k = flagKey(f);
   const on = k in state.flags;
@@ -472,11 +505,14 @@ function renderForm() {
         el("option", { value: "", text: "Any" }),
         config.filter.protocols.map((p) => el("option", { value: p, text: p, selected: p === s.proto })))),
     textField("raw", "Extra filter expression", "raw", "tcp[13] & 2 != 0"),
-    config.filter.snippets.length > 0 && el("div", { class: "chips" }, config.filter.snippets.map((sn) =>
-      el("button", {
-        type: "button", class: "chip", title: sn.expression, text: sn.label,
-        onclick: () => { s.raw = s.raw.trim() ? `${s.raw.trim()} or ${sn.expression}` : sn.expression; changed(true); },
-      }))));
+    config.filter.snippets.length > 0 && el("div", { class: "chips", id: "snippets" }, config.filter.snippets.map((sn) => {
+      const on = snippetPattern(sn.expression).test(s.raw);
+      return el("button", {
+        type: "button", class: on ? "chip active" : "chip", title: sn.expression, text: sn.label,
+        "data-expression": sn.expression, "aria-pressed": String(on),
+        onclick: () => { s.raw = toggleSnippet(s.raw, sn.expression); changed(true); },
+      });
+    })));
 
   $("#form").replaceChildren(system, where, output, schedule, flags, filter);
   syncEstimateInputs();
