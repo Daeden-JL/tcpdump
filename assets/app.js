@@ -178,14 +178,19 @@ function changed(rerender) {
   timer = setTimeout(refresh, rerender ? 0 : 150);
 }
 
+// Any placeholder, whatever it is called: <interface>, <mgmt interface>, ...
+const PLACEHOLDER = /<[A-Za-z0-9 _-]*[A-Za-z0-9_-][A-Za-z0-9 _-]*>/g;
+const hasPlaceholder = (text) => text.search(PLACEHOLDER) !== -1;
+
 // What each field held before its placeholder toggle was switched on, so
 // switching it off puts the value back.
 const beforePlaceholder = {};
 
 // `token` is a placeholder such as "<interface>" that this field accepts.
 // A toggle under the field inserts it (leaving the value open for whoever
-// gets the link) and takes it out again. `append` adds the placeholder to
-// what is already typed instead of replacing it.
+// gets the link) and takes it out again. The toggle is on whenever the field
+// holds a placeholder of any name, and switching it off removes them all.
+// `append` adds the placeholder to what is already typed instead of replacing it.
 function textField(id, label, key, hint, token, append) {
   let toggle = null;
   const field = el("label", { class: "field", for: id },
@@ -195,23 +200,23 @@ function textField(id, label, key, hint, token, append) {
       autocapitalize: "off",
       oninput: (e) => {
         state[key] = e.target.value;
-        if (toggle) toggle.checked = state[key].includes(token);
+        if (toggle) toggle.checked = hasPlaceholder(state[key]);
         changed(false);
       },
     }));
   if (!token) return field;
   toggle = el("input", {
-    id: `${id}-open`, type: "checkbox", role: "switch", checked: state[key].includes(token),
+    id: `${id}-open`, type: "checkbox", role: "switch", checked: hasPlaceholder(state[key]),
     onchange: (e) => {
       const current = state[key].trim();
       if (e.target.checked) {
         beforePlaceholder[key] = current;
         state[key] = append && current ? `${current}, ${token}` : token;
       } else {
-        // Take the placeholder out; if nothing is left, put back what was there before.
-        const rest = current.split(token).join("").split(",").map((p) => p.trim()).filter(Boolean).join(", ");
+        // Take every placeholder out; if nothing is left, put back what was there before.
+        const rest = current.replace(PLACEHOLDER, "").split(",").map((p) => p.trim()).filter(Boolean).join(", ");
         const earlier = beforePlaceholder[key] || "";
-        state[key] = rest || (earlier.includes(token) ? "" : earlier) || (key === "ifaces" ? target().default_interface : "");
+        state[key] = rest || (hasPlaceholder(earlier) ? "" : earlier) || (key === "ifaces" ? target().default_interface : "");
       }
       changed(true);
     },

@@ -175,7 +175,8 @@ by itself, and that files accumulate from run to run. `cron_install`,
 Interfaces, node numbers, the subfolder, hosts, networks and ports can be
 left open as a placeholder such as `<interface>` or `<client IP address>`
 (type it, or switch on the "Leave open as ..." toggle under the field;
-switching it off puts the previous value back). The command
+switching it off puts the previous value back). The toggle is on for a
+placeholder of any name, so `<mgmt interface>` counts too. The command
 then shows the placeholder, and anyone opening the link gets a **Fill in
 before running** panel at the top with one box per placeholder. What they type
 is checked like any other value and put into the command; the settings keep
