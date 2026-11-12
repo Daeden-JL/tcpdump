@@ -5,7 +5,7 @@
 //! The result is a query (the same form as a share link), so it goes through
 //! the builder's normal validation before any command is shown again.
 
-use crate::builder::AT_UNITS;
+use crate::builder::{is_placeholder, split_atoms, valid_subdir, AT_UNITS};
 use crate::config::{Cluster, Config, Flag, Target, ValueType};
 
 pub struct Parsed {
@@ -186,7 +186,8 @@ struct Guided {
 /// writes: groups of hosts/networks, ports and one protocol joined by `and`.
 fn guided_filter(words: &[String], protocols: &[String]) -> Option<Guided> {
     let spaced = words.join(" ").replace('(', " ( ").replace(')', " ) ");
-    let toks: Vec<&str> = spaced.split_whitespace().collect();
+    let atoms = split_atoms(&spaced, false);
+    let toks: Vec<&str> = atoms.iter().map(String::as_str).collect();
     let mut parts: Vec<&[&str]> = Vec::new();
     let (mut depth, mut from) = (0i32, 0);
     for (i, t) in toks.iter().enumerate() {
@@ -251,43 +252,137 @@ fn read_at_spec(spec: &str) -> Option<(&'static str, String, String)> {
     }
 }
 
-/// Pull `at ... <<'EOF'` jobs out of the text. Returns the text with only the
+/// Map a cron expression back onto the repeat settings.
+fn read_cron(expr: &str) -> Vec<(String, String)> {
+    let f: Vec<&str> = expr.split_whitespace().collect();
+    let num = |s: &str| s.parse::<u32>().ok();
+    let pair = |k: &str, v: String| (k.to_string(), v);
+    let mut out = vec![pair("as", "cron".into())];
+    match f[..] {
+        [m, h, "*", "*", dow] if num(m).is_some() && num(h).is_some() && (dow == "*" || dow.split(',').all(|d| num(d).is_some())) => {
+            out.push(pair("ct", format!("{:02}:{:02}", num(h).unwrap_or(0), num(m).unwrap_or(0))));
+            if dow == "*" {
+                out.push(pair("ck", "daily".into()));
+            } else {
+                out.push(pair("ck", "weekdays".into()));
+                out.push(pair("cd", dow.to_string()));
+            }
+        }
+        ["0", h, "*", "*", "*"] if h.strip_prefix("*/").and_then(num).is_some() => {
+            out.push(pair("ck", "hours".into()));
+            out.push(pair("ch", h[2..].to_string()));
+        }
+        _ => {
+            out.push(pair("ck", "custom".into()));
+            out.push(pair("cx", f.join(" ")));
+        }
+    }
+    out
+}
+
+/// Pull scheduling out of the text: `at ... <<'EOF'` jobs, and the script
+/// plus crontab line of a recurring capture. Returns the text with only the
 /// capture command left in it, and the schedule as query pairs.
 fn split_schedule(text: &str, notes: &mut Vec<String>) -> (String, Vec<(String, String)>) {
     let lines: Vec<&str> = text.lines().collect();
     let mut kept: Vec<&str> = Vec::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut put = |k: &str, v: &str| pairs.push((k.to_string(), v.to_string()));
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i].trim();
-        let at = line.strip_prefix("sudo ").unwrap_or(line).strip_prefix("at ").and_then(|rest| rest.split_once("<<"));
-        let Some((spec, delimiter)) = at else {
-            kept.push(lines[i]);
-            i += 1;
-            continue;
-        };
-        let delimiter = delimiter.trim().trim_start_matches('-').trim_matches(['\'', '"']);
-        let body_start = i + 1;
-        while i + 1 < lines.len() && lines[i + 1].trim() != delimiter {
-            i += 1;
-        }
-        let body = &lines[body_start..=i.max(body_start - 1)];
-        i += 2;
-        // A job with a capture in it is the start; anything else is the stop.
-        let is_start = find_tcpdump(&body.join(" ")).is_some();
-        match read_at_spec(spec) {
-            Some((mode, value, unit)) => {
-                let (m, v, u) = if is_start { ("as", "asv", "asu") } else { ("ae", "aev", "aeu") };
-                pairs.push((m.into(), mode.into()));
-                pairs.push((v.into(), value));
-                if !unit.is_empty() {
-                    pairs.push((u.into(), unit));
+        let plain = line.strip_prefix("sudo ").unwrap_or(line);
+        i += 1;
+        // The crontab line of a recurring capture: ... echo '<expr> <script>' ...
+        if plain.contains("crontab") {
+            let entry = plain.split_once("echo '").and_then(|(_, rest)| rest.split_once('\''));
+            if let Some((entry, _)) = entry {
+                let fields: Vec<&str> = entry.split_whitespace().collect();
+                if fields.len() >= 6 {
+                    for (k, v) in read_cron(&fields[..5].join(" ")) {
+                        put(&k, &v);
+                    }
+                    let name = fields[5].rsplit('/').next().and_then(|f| f.strip_prefix("tcpdump_")).and_then(|f| f.strip_suffix(".sh"));
+                    if let Some(name) = name {
+                        put("cn", name);
+                    }
                 }
             }
-            None => notes.push(format!("The schedule \"at {}\" is not a form the builder can set and was left out.", spec.trim())),
+            continue;
         }
-        if is_start {
-            kept.extend(body);
+        if plain.starts_with("chmod ") {
+            continue;
+        }
+        // An `at` job queued from a script file: at -f <script> <when>
+        if let Some(rest) = plain.strip_prefix("at -f ") {
+            let (path, spec) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            match read_at_spec(spec) {
+                Some((mode, value, unit)) => {
+                    put("as", mode);
+                    put("asv", &value);
+                    if !unit.is_empty() {
+                        put("asu", &unit);
+                    }
+                    put("asc", "1");
+                    let name = path.rsplit('/').next().and_then(|f| f.strip_prefix("tcpdump_")).and_then(|f| f.strip_suffix(".sh"));
+                    if let Some(name) = name {
+                        put("cn", name);
+                    }
+                }
+                None => notes.push(format!("The schedule \"at {}\" is not a form the builder can set and was left out.", spec.trim())),
+            }
+            continue;
+        }
+        let Some((head, delimiter)) = plain.split_once("<<") else {
+            kept.push(lines[i - 1]);
+            continue;
+        };
+        // A here-document: collect its body up to the delimiter.
+        let delimiter = delimiter.trim().trim_start_matches('-').trim_matches(['\'', '"']);
+        let start = i;
+        while i < lines.len() && lines[i].trim() != delimiter {
+            i += 1;
+        }
+        let body = &lines[start..i];
+        i += 1;
+        match head.strip_prefix("at ") {
+            Some(spec) => {
+                // A job with a capture in it is the start; anything else is the stop.
+                let is_start = find_tcpdump(&body.join(" ")).is_some();
+                match read_at_spec(spec) {
+                    Some((mode, value, unit)) => {
+                        let (m, v, u) = if is_start { ("as", "asv", "asu") } else { ("ae", "aev", "aeu") };
+                        put(m, mode);
+                        put(v, &value);
+                        if !unit.is_empty() {
+                            put(u, &unit);
+                        }
+                    }
+                    None => notes.push(format!("The schedule \"at {}\" is not a form the builder can set and was left out.", spec.trim())),
+                }
+                if is_start {
+                    kept.extend(body);
+                }
+            }
+            // The script of a recurring capture (cat > file, or tee file).
+            None => {
+                for line in body {
+                    let t = line.trim();
+                    let sleep = t.strip_prefix("(sleep ").and_then(|r| r.split_once(';')).and_then(|(n, _)| n.trim().parse::<u64>().ok());
+                    if let Some(seconds) = sleep {
+                        let (n, unit) = match seconds {
+                            s if s % 86400 == 0 => (s / 86400, "days"),
+                            s if s % 3600 == 0 => (s / 3600, "hours"),
+                            s => (s / 60, "minutes"),
+                        };
+                        put("ae", "delay");
+                        put("aev", &n.to_string());
+                        put("aeu", unit);
+                    } else if !t.starts_with("#!") {
+                        kept.push(line);
+                    }
+                }
+            }
         }
     }
     (kept.join("\n"), pairs)
@@ -372,8 +467,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
             }
         }
     }
-    let filter_words: Vec<String> =
-        tokens[i..].iter().flat_map(|t| t.0.split_whitespace().map(str::to_string)).collect();
+    let filter_words: Vec<String> = tokens[i..].iter().flat_map(|t| split_atoms(&t.0, false)).collect();
 
     // Interface: a name, the catch-all pseudo-interface, or a loop variable.
     let can_all = target.all_interfaces.is_some() || target.any_interface.is_some();
@@ -409,7 +503,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         all = false;
     }
     names.retain(|n| {
-        let ok = simple_name(n, "_.:-");
+        let ok = simple_name(n, "_.:-") || is_placeholder(n);
         if !ok {
             notes.push(format!("{n} is not a real interface name and was left out."));
         }
@@ -432,7 +526,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
                 if dated {
                     rest = rest[..rest.len() - ds.len()].trim_matches('/');
                 }
-                if simple_name(rest, "_./-") && !rest.split('/').any(|p| p == "..") {
+                if valid_subdir(rest) {
                     put("sd", rest);
                 } else if !rest.is_empty() {
                     notes.push(format!("The folder \"{rest}\" cannot be set in the builder; the standard folder is used."));
@@ -463,10 +557,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
 
     if !filter_words.is_empty() {
         let filter = filter_words.join(" ");
-        let placeholder = filter.as_bytes().windows(2).any(|w| w[0] == b'<' && w[1].is_ascii_alphabetic());
-        if placeholder {
-            notes.push(format!("The filter \"{filter}\" still has a placeholder in it and was left out."));
-        } else if let Some(g) = guided_filter(&filter_words, &cfg.filter.protocols) {
+        if let Some(g) = guided_filter(&filter_words, &cfg.filter.protocols) {
             for (k, v) in [("h", g.hosts.join(",")), ("net", g.nets.join(",")), ("p", g.ports.join(",")), ("pr", g.proto)] {
                 if !v.is_empty() {
                     put(k, &v);
@@ -514,6 +605,8 @@ mod tests {
             "v=1&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30&ae=date&aev=2026-11-12T05:00",
             "v=1&if=lagg0&w=1&dd=1&lg=0&bg=0&f.s=600&f.C=500&f.W=5&ae=delay&aev=2&aeu=hours",
             "v=1&t=linux&if=eth0&w=1&dd=1&lg=1&bg=0&f.s=600&f.G=300&f.W=2&as=delay&asv=90&asu=minutes&p=53",
+            "v=1&sc=all&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30&asc=1&cn=case42&ae=date&aev=2026-11-12T05:00",
+            "v=1&t=linux&if=eth0&w=1&dd=1&lg=1&bg=0&f.s=600&f.G=300&f.W=2&as=delay&asv=2&asu=hours&asc=1",
         ] {
             let original = build(&cfg, &parse_query(q));
             assert!(original.command.contains("<<'EOF'"), "{q}");
@@ -592,12 +685,34 @@ mod tests {
     }
 
     #[test]
-    fn placeholders_are_reported_not_applied() {
-        let p = parse(&cfg(), "tcpdump -i <interface> -s 600 host <client IP address> &", "powerscale").unwrap();
-        assert_eq!((get(&p, "if"), get(&p, "h"), get(&p, "q")), (None, None, None));
-        assert_eq!(get(&p, "f.s"), Some("600"));
-        assert_eq!(p.notes.len(), 2, "{:?}", p.notes);
-        assert!(!build(&cfg(), &p.pairs).command.is_empty());
+    fn placeholders_are_kept_as_placeholders() {
+        let text = "mkdir -p /ifs/data/Isilon_Support/<case number>/$(date +%F); isi_for_array -n<nodes> 'tcpdump -i <interface> -s 600 -C 500 -W 5 \
+                    -w /ifs/data/Isilon_Support/<case number>/$(date +%F)/x.pcap host <client IP address> or host 10.0.0.1 &'";
+        let p = parse(&cfg(), text, "powerscale").unwrap();
+        assert!(p.notes.is_empty(), "{:?}", p.notes);
+        assert_eq!((get(&p, "if"), get(&p, "n"), get(&p, "sd")), (Some("<interface>"), Some("<nodes>"), Some("<case number>")));
+        assert_eq!(get(&p, "h"), Some("<client IP address>,10.0.0.1"));
+        let out = build(&cfg(), &p.pairs);
+        assert!(out.command.contains("-i <interface>") && out.command.contains("\"host <client IP address> or host 10.0.0.1\""));
+        let names: Vec<&str> = out.placeholders.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["<interface>", "<client IP address>", "<nodes>", "<case number>"]);
+    }
+
+    #[test]
+    fn recurring_captures_survive_a_round_trip() {
+        let cfg = cfg();
+        for q in [
+            "v=1&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=300&f.W=2&as=cron&ck=daily&ct=01:30",
+            "v=1&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=cron&ck=weekdays&ct=22:05&cd=1,3,5&cn=nightly&ae=delay&aev=2&aeu=hours",
+            "v=1&t=linux&if=eth0&w=1&dd=1&lg=1&bg=0&f.s=600&f.G=60&f.W=5&as=cron&ck=hours&ch=6&p=53",
+            "v=1&t=linux&if=eth0&w=1&dd=1&lg=0&bg=0&f.c=1000&as=cron&ck=custom&cx=*/15 9-17 * * 1-5&ae=delay&aev=90&aeu=minutes",
+        ] {
+            let original = build(&cfg, &parse_query(q));
+            assert!(original.command.contains("crontab -"), "{q}: {:?}", original.issues);
+            let parsed = parse(&cfg, &original.command, "").expect("command found");
+            assert!(parsed.notes.is_empty(), "{q}: {:?}", parsed.notes);
+            assert_eq!(build(&cfg, &parsed.pairs).command, original.command, "{q}");
+        }
     }
 
     #[test]

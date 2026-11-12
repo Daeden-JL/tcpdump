@@ -130,6 +130,56 @@ EOF
 `at_command` sets how the job is queued (`sudo at` on Linux) and `at_note` is
 the text shown beside the settings. Parse reads these jobs back.
 
+### Queuing an `at` job from a script
+
+With a scheduled start, **Put the capture in a script file** writes the
+capture to `tcpdump_<job name>.sh` and queues that file with `at -f`, instead
+of passing the command inline. The script stays on disk, so it can be read,
+edited and queued again. `at_script_install` and `script_remove` in the TOML
+control how it is written and deleted.
+
+### Listing and removing scheduled jobs
+
+Whenever a capture is scheduled, the result panel shows the commands for
+looking after it: `atq`, `at -c <job number>` and `atrm <job number>` for `at`
+jobs, or `crontab -l` and a ready-made removal command for a recurring
+capture. They come from `at_list`, `at_show`, `at_remove`, `cron_list` and
+`cron_remove` in the TOML.
+
+### Recurring captures with cron
+
+Ticking **Recurring capture (repeat with cron)** shows the cron settings and
+installs a recurring capture: every
+day at a time, on chosen weekdays, every few hours, or a custom five-field
+cron expression. Cron treats `%` specially and tcpdump file names are full of
+them, so the capture is written into a small script and the crontab gets one
+line that runs it:
+
+```bash
+cat > /ifs/data/Isilon_Support/tcpdump_nightly.sh <<'EOF'
+#!/bin/sh
+mkdir -p /ifs/data/Isilon_Support/$(date +%F); tcpdump -i lagg0 ...
+EOF
+chmod +x /ifs/data/Isilon_Support/tcpdump_nightly.sh
+(crontab -l 2>/dev/null | grep -v '/ifs/data/Isilon_Support/tcpdump_nightly.sh'; echo '30 1 * * 1-5 /ifs/data/Isilon_Support/tcpdump_nightly.sh') | crontab -
+```
+
+Running it again replaces the earlier line instead of adding a second one.
+A recurring capture can be stopped a set time after each start (a `sleep`
+inside the script). The page warns when a recurring capture would never end
+by itself, and that files accumulate from run to run. `cron_install`,
+`cron_remove` and `cron_dir` in the TOML control how and where it is installed.
+
+## Placeholders
+
+Interfaces, node numbers, the subfolder, hosts, networks and ports can be
+left open as a placeholder such as `<interface>` or `<client IP address>`
+(type it, or use the "Leave open as ..." button under the field). The command
+then shows the placeholder, and anyone opening the link gets a **Fill in
+before running** panel at the top with one box per placeholder. What they type
+is checked like any other value and put into the command; the settings keep
+the placeholder, so the same link can be handed on again.
+
 ## Capture size estimate
 
 The result panel shows how much disk the capture can use:
@@ -139,6 +189,10 @@ The result panel shows how much disk the capture can use:
 - **Rotation by time** (`-G` with `-W`) depends on traffic, so the figure is a
   worst case: a link of the chosen speed completely full in both directions.
   A second line shows what the snap length saves on full-size frames.
+- For that worst case the link speed is taken from each interface's name
+  where it is recognised (`ix0` is 10 Gbit/s, `mlxen0` 40 Gbit/s), using the
+  `interface_speeds` table under `[estimate]`. The link-speed dropdown is
+  shown only for names that are not in the table, such as `lagg0`.
 - When the command runs on all nodes or loops over all interfaces, their
   number is not in the command, so the box asks for a count.
 - A warning appears when nothing caps the capture (no `-W`, or no rotation),
