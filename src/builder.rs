@@ -99,6 +99,8 @@ pub struct Output {
     pub issues: Vec<Issue>,
     pub estimate: Option<Estimate>,
     pub placeholders: Vec<Placeholder>,
+    /// The command explained in a few plain sentences.
+    pub summary: Vec<String>,
     /// One line saying when a scheduled capture runs.
     pub schedule_summary: Option<String>,
     pub manage: Vec<Manage>,
@@ -1116,6 +1118,130 @@ fn estimate(cfg: &Config, st: &State, looped_all: bool, cx: &mut Ctx) -> Estimat
     Estimate { kind, headline, lines, need_nodes, need_ifaces: looped_all && st.iface_mode == "all", need_link: kind == "worst" && from_dropdown }
 }
 
+/// "a", "a and b", "a, b and c".
+fn word_list(items: &[String], last: &str) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., end] => format!("{} {last} {end}", rest.join(", ")),
+    }
+}
+
+/// When an `at` job runs, in words. `None` when nothing is scheduled that way.
+fn when_in_words(mode: &str, value: &str, unit: &str) -> Option<String> {
+    match mode {
+        "time" => Some(format!("at {value}")),
+        "date" => value.split_once('T').map(|(day, time)| format!("on {day} at {time}")),
+        "delay" => {
+            let unit = if value == "1" { unit.trim_end_matches('s') } else { unit };
+            Some(format!("{value} {unit} after the command is pasted"))
+        }
+        _ => None,
+    }
+}
+
+/// Explain the command as configured, in a few short sentences.
+fn summarize(cfg: &Config, st: &State, target: &Target, dir: &str, background: bool, stop_delay: Option<u64>) -> Vec<String> {
+    let value = |role: Role| -> Option<u128> {
+        let f = cfg.flags.iter().find(|f| f.role == Some(role))?;
+        st.flags.get(f.key())?.parse().ok()
+    };
+    let mut lines = Vec::new();
+
+    // Where.
+    let ifaces = if st.iface_mode == "all" { "every interface".to_string() } else { word_list(&st.ifaces, "and") };
+    let nodes = match st.scope.as_str() {
+        "all" => " on every node".to_string(),
+        "nodes" => format!(" on node{} {}", if st.nodes.contains([',', '-', '<']) { "s" } else { "" }, st.nodes),
+        _ if target.cluster.is_some() => " on this node".to_string(),
+        _ => String::new(),
+    };
+    lines.push(format!("Captures on {ifaces}{nodes}."));
+
+    // What traffic.
+    let mut which = Vec::new();
+    let addresses: Vec<String> = st.hosts.iter().cloned().chain(st.nets.iter().map(|n| format!("network {n}"))).collect();
+    if !addresses.is_empty() {
+        which.push(format!("to or from {}", word_list(&addresses, "or")));
+    }
+    if !st.ports.is_empty() {
+        which.push(format!("on port{} {}", if st.ports.len() > 1 || st.ports[0].contains('-') { "s" } else { "" }, word_list(&st.ports, "or")));
+    }
+    if !st.proto.is_empty() {
+        which.push(format!("using {}", st.proto));
+    }
+    if !st.raw.trim().is_empty() {
+        which.push(format!("matching \"{}\"", st.raw.trim()));
+    }
+    lines.push(if which.is_empty() { "All traffic is captured; there is no filter.".to_string() } else { format!("Only traffic {}.", which.join(", and ")) });
+
+    // What is kept, and how the files are limited.
+    let kept = match value(Role::SnapLength) {
+        Some(n) if n > 0 => format!("the first {n} bytes of each packet"),
+        _ => "whole packets".to_string(),
+    };
+    let (size_mb, count) = (value(Role::FileSizeMb), value(Role::FileCount));
+    let (seconds, packets) = (value(Role::RotateSeconds), value(Role::PacketCount));
+    if st.write {
+        lines.push(format!("Saves {kept} to {dir}."));
+        lines.push(match (size_mb, seconds, count) {
+            (Some(mb), _, Some(n)) => format!("Keeps the newest {} of {mb} MB per interface, overwriting the oldest, until it is stopped.", plural(n, "file")),
+            (Some(mb), _, None) => format!("Starts a new {mb} MB file each time one fills, with no limit on how many."),
+            (None, Some(s), Some(n)) => format!("Starts a new file every {} and ends by itself after {} ({}).", human_duration(s), plural(n, "file"), human_duration(s * n)),
+            (None, Some(s), None) => format!("Starts a new file every {} and keeps going until it is stopped.", human_duration(s)),
+            _ => "Writes one file per interface, which grows until the capture is stopped.".to_string(),
+        });
+    } else {
+        lines.push("Prints packets to the screen; nothing is saved.".to_string());
+    }
+    if let Some(n) = packets {
+        lines.push(format!("Stops after {}.", plural(n, "packet")));
+    }
+    match (background, st.write && st.log) {
+        (true, true) => lines.push("Runs in the background, with tcpdump's own messages saved to a .log file beside the capture.".into()),
+        (true, false) => lines.push("Runs in the background.".into()),
+        (false, true) => lines.push("tcpdump's own messages are saved to a .log file beside the capture.".into()),
+        _ => {}
+    }
+
+    // Other options, by their labels.
+    let extras: Vec<String> = cfg
+        .flags
+        .iter()
+        .filter(|f| f.role.is_none() && st.flags.contains_key(f.key()))
+        .map(|f| {
+            let label = if f.label.is_empty() { f.name.clone() } else { format!("{} ({})", f.label.to_lowercase(), f.name) };
+            match (f.value_type, st.flags[f.key()].as_str()) {
+                (ValueType::Bool, _) | (_, "") => label,
+                (_, v) => format!("{label} set to {v}"),
+            }
+        })
+        .collect();
+    if !extras.is_empty() {
+        lines.push(format!("Also: {}.", word_list(&extras, "and")));
+    }
+
+    // When.
+    if st.at_start == "cron" {
+        if let Ok(expr) = cron_expr(st) {
+            let via = "Installed as a cron job that runs a script.";
+            lines.push(format!("{} {via}", describe_cron(&expr)));
+        }
+        if let Some(minutes) = stop_delay {
+            lines.push(format!("Each run is stopped after {}.", human_duration(u128::from(minutes) * 60)));
+        }
+    } else {
+        if let Some(when) = when_in_words(&st.at_start, &st.at_start_value, &st.at_start_unit) {
+            let how = if st.at_script { "queued with at from a script file" } else { "queued with at" };
+            lines.push(format!("Starts {when} ({how}), not straight away."));
+        }
+        if let Some(when) = when_in_words(&st.at_stop, &st.at_stop_value, &st.at_stop_unit) {
+            lines.push(format!("A stop is queued for {when}."));
+        }
+    }
+    lines
+}
+
 fn target_of<'a>(cfg: &'a Config, st: &State) -> &'a Target {
     cfg.targets.iter().find(|t| t.id == st.target).unwrap_or(&cfg.targets[0])
 }
@@ -1344,6 +1470,7 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         issues: cx.issues,
         estimate,
         placeholders,
+        summary: if failed { Vec::new() } else { summarize(cfg, &st, target, &dir, background, stop_delay) },
         schedule_summary: schedule_summary.filter(|_| !failed),
         manage: if failed { Vec::new() } else { manage },
         state: raw,
@@ -1693,6 +1820,51 @@ mod tests {
             assert!(errors(&f.output).is_empty() && !f.changes.is_empty(), "{q}: {:?}", f.output.issues);
             assert!(!f.output.command.contains("reboot") && !f.output.command.contains("$(id)") && !f.output.command.contains(";id"));
         }
+    }
+
+    #[test]
+    fn summary_explains_the_command_in_plain_words() {
+        let o = run("v=1&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.G=3600&f.W=4&h=192.168.1.1");
+        assert_eq!(o.summary, [
+            "Captures on lagg0 on this node.",
+            "Only traffic to or from 192.168.1.1.",
+            "Saves the first 600 bytes of each packet to /ifs/data/Isilon_Support/$(date +%F).",
+            "Starts a new file every 1 hour and ends by itself after 4 files (4 hours).",
+            "Runs in the background, with tcpdump's own messages saved to a .log file beside the capture.",
+        ]);
+
+        let o = run("v=1&sc=nodes&n=1,2&if=bxe0,bxe1&sd=NDMP&w=1&dd=1&lg=0&bg=1&f.s=0&f.C=1024&f.W=10&f.B=65536&h=10.0.0.1,10.0.0.2&net=172.26.0.0/16&p=445,2049&pr=tcp&as=time&asv=01:00&ae=delay&aev=1&aeu=hours");
+        assert_eq!(o.summary, [
+            "Captures on bxe0 and bxe1 on nodes 1,2.",
+            "Only traffic to or from 10.0.0.1, 10.0.0.2 or network 172.26.0.0/16, and on ports 445 or 2049, and using tcp.",
+            "Saves whole packets to /ifs/data/Isilon_Support/NDMP/$(date +%F).",
+            "Keeps the newest 10 files of 1024 MB per interface, overwriting the oldest, until it is stopped.",
+            "Runs in the background.",
+            "Also: buffer size (-B) set to 65536.",
+            "Starts at 01:00 (queued with at), not straight away.",
+            "A stop is queued for 1 hour after the command is pasted.",
+        ]);
+
+        let o = run("v=1&t=linux&im=all&w=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000");
+        assert_eq!(o.summary, [
+            "Captures on every interface.",
+            "Only traffic matching \"ether[12:2]=0x88cc or ether[20:2]=0x2000\".",
+            "Prints packets to the screen; nothing is saved.",
+            "Stops after 1 packet.",
+            "Also: no name lookups (-nn) and verbose (-v).",
+        ]);
+
+        let o = run("v=1&sc=all&if=<interface>&w=1&f.C=500&as=cron&ck=weekdays&ct=22:15&cd=1,5&ae=delay&aev=90&aeu=minutes");
+        assert_eq!(o.summary[0], "Captures on <interface> on every node.");
+        assert_eq!(o.summary[1], "All traffic is captured; there is no filter.");
+        assert_eq!(o.summary[3], "Starts a new 500 MB file each time one fills, with no limit on how many.");
+        assert_eq!(o.summary[5], "Runs at 22:15 on Monday, Friday. Installed as a cron job that runs a script.");
+        assert_eq!(o.summary[6], "Each run is stopped after 1 hour 30 minutes.");
+
+        // No summary while there is no command.
+        assert!(run("v=1&f.s=abc").summary.is_empty());
+        // A filled-in placeholder is described by its value.
+        assert_eq!(run("v=1&if=<interface>&w=0&ph.<interface>=ix0,ix1").summary[0], "Captures on ix0 and ix1 on this node.");
     }
 
     #[test]

@@ -622,6 +622,8 @@ function showOutput(out, keepText) {
   $("#fix").hidden = !out.issues.some((i) => i.level === "error");
   showEstimate(out.estimate);
   showPlaceholders(out.placeholders);
+  $("#summary").hidden = !out.summary.length;
+  $("#summary").replaceChildren(...out.summary.map((line) => el("li", { text: line })));
   showManage(out);
   markFields(out.issues);
   $("#stop").hidden = !out.stop_command;

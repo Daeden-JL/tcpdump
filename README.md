@@ -87,6 +87,14 @@ stays live and the page shows the error.
 To add an example, set the builder up the way you want and copy everything
 after the `?` in the address bar into `query`.
 
+## Summary under the command
+
+Below the command is a short plain-language summary of what it does as
+configured: where it captures, which traffic, what is saved and how the files
+are limited, how it runs, and when it starts and stops if scheduled. It is
+written by the server from the same settings as the command, so the two
+always agree.
+
 ## Editing the command
 
 The command box is editable. Change it, or paste a command from elsewhere,

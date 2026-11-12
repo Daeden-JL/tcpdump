@@ -270,4 +270,6 @@ textarea#command { white-space: pre-wrap; }
   color: var(--code-ink);
 }
 #cron_days { padding: 2px 4px; border-radius: 6px; }
+#summary { margin: 0 0 10px; padding-left: 18px; font-size: 0.9rem; overflow-wrap: anywhere; }
+#summary li { margin-bottom: 3px; }
 [hidden] { display: none !important; }
