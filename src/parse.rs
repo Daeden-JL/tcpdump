@@ -313,6 +313,26 @@ fn split_schedule(text: &str, notes: &mut Vec<String>) -> (String, Vec<(String, 
         if plain.starts_with("chmod ") {
             continue;
         }
+        // An `at` job queued from a script file: at -f <script> <when>
+        if let Some(rest) = plain.strip_prefix("at -f ") {
+            let (path, spec) = rest.trim().split_once(' ').unwrap_or((rest.trim(), ""));
+            match read_at_spec(spec) {
+                Some((mode, value, unit)) => {
+                    put("as", mode);
+                    put("asv", &value);
+                    if !unit.is_empty() {
+                        put("asu", &unit);
+                    }
+                    put("asc", "1");
+                    let name = path.rsplit('/').next().and_then(|f| f.strip_prefix("tcpdump_")).and_then(|f| f.strip_suffix(".sh"));
+                    if let Some(name) = name {
+                        put("cn", name);
+                    }
+                }
+                None => notes.push(format!("The schedule \"at {}\" is not a form the builder can set and was left out.", spec.trim())),
+            }
+            continue;
+        }
         let Some((head, delimiter)) = plain.split_once("<<") else {
             kept.push(lines[i - 1]);
             continue;
@@ -585,6 +605,8 @@ mod tests {
             "v=1&sc=all&im=all&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30&ae=date&aev=2026-11-12T05:00",
             "v=1&if=lagg0&w=1&dd=1&lg=0&bg=0&f.s=600&f.C=500&f.W=5&ae=delay&aev=2&aeu=hours",
             "v=1&t=linux&if=eth0&w=1&dd=1&lg=1&bg=0&f.s=600&f.G=300&f.W=2&as=delay&asv=90&asu=minutes&p=53",
+            "v=1&sc=all&if=lagg0&w=1&dd=1&lg=1&bg=1&f.s=600&f.C=500&f.W=5&as=date&asv=2026-11-12T01:30&asc=1&cn=case42&ae=date&aev=2026-11-12T05:00",
+            "v=1&t=linux&if=eth0&w=1&dd=1&lg=1&bg=0&f.s=600&f.G=300&f.W=2&as=delay&asv=2&asu=hours&asc=1",
         ] {
             let original = build(&cfg, &parse_query(q));
             assert!(original.command.contains("<<'EOF'"), "{q}");

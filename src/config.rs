@@ -32,11 +32,21 @@ pub struct EstimateConfig {
     pub link_speeds_gbit: Vec<u64>,
     #[serde(default = "d_link_speed")]
     pub default_link_speed_gbit: u64,
+    /// Link speed implied by an interface name: `prefix` followed by a number.
+    #[serde(default)]
+    pub interface_speeds: Vec<InterfaceSpeed>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InterfaceSpeed {
+    pub prefix: String,
+    pub gbit: u64,
 }
 
 impl Default for EstimateConfig {
     fn default() -> Self {
-        EstimateConfig { link_speeds_gbit: d_link_speeds(), default_link_speed_gbit: d_link_speed() }
+        EstimateConfig { link_speeds_gbit: d_link_speeds(), default_link_speed_gbit: d_link_speed(), interface_speeds: Vec::new() }
     }
 }
 
@@ -225,7 +235,13 @@ pub struct Target {
     pub at_show: String,
     #[serde(default = "d_at_remove")]
     pub at_remove: String,
-    /// Folder the cron script is written to. Defaults to `output_dir`.
+    /// Queues an `at` job from a script file: {dir} {script} {command} {at} {spec}.
+    #[serde(default = "d_at_script_install")]
+    pub at_script_install: String,
+    /// Deletes that script: {script}.
+    #[serde(default = "d_script_remove")]
+    pub script_remove: String,
+    /// Folder scripts are written to. Defaults to `output_dir`.
     #[serde(default)]
     pub cron_dir: Option<String>,
     /// Installs a recurring capture: {dir} {script} {expr} {command}.
@@ -398,6 +414,12 @@ fn d_at_show() -> String {
 fn d_at_remove() -> String {
     "atrm <job number>".into()
 }
+fn d_at_script_install() -> String {
+    "mkdir -p {dir}\ncat > {script} <<'EOF'\n#!/bin/sh\n{command}\nEOF\nchmod +x {script}\n{at} -f {script} {spec}".into()
+}
+fn d_script_remove() -> String {
+    "rm -f {script}".into()
+}
 fn d_cron_install() -> String {
     "mkdir -p {dir}\ncat > {script} <<'EOF'\n#!/bin/sh\n{command}\nEOF\nchmod +x {script}\n(crontab -l 2>/dev/null | grep -v '{script}'; echo '{expr} {script}') | crontab -".into()
 }
@@ -466,6 +488,11 @@ impl Config {
         }
         if self.estimate.link_speeds_gbit.iter().any(|s| *s == 0 || *s > 1000) {
             return Err("estimate.link_speeds_gbit entries must be between 1 and 1000".into());
+        }
+        for s in &self.estimate.interface_speeds {
+            if s.prefix.is_empty() || !s.prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || s.gbit == 0 || s.gbit > 1000 {
+                return Err(format!("estimate.interface_speeds entry {:?} needs a plain name prefix and a speed from 1 to 1000", s.prefix));
+            }
         }
         let mut roles = Vec::new();
         for f in self.flags.iter().filter(|f| f.role.is_some()) {

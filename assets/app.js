@@ -22,7 +22,7 @@ function el(tag, props, ...kids) {
     else if (k in node && k !== "list") node[k] = v;
     else node.setAttribute(k, v);
   }
-  for (const kid of kids.flat()) if (kid) node.append(kid);
+  for (const kid of kids.flat(Infinity)) if (kid) node.append(kid);
   return node;
 }
 
@@ -65,6 +65,7 @@ function serialise(skip = []) {
   } else if (s.at_start !== "now") {
     p.push(["as", s.at_start], ["asv", s.at_start_value.trim()]);
     if (s.at_start === "delay") p.push(["asu", s.at_start_unit]);
+    if (s.at_script) p.push(["asc", "1"], ["cn", s.cron_name.trim()]);
   }
   if (s.at_stop !== "none") {
     p.push(["ae", s.at_stop], ["aev", s.at_stop_value.trim()]);
@@ -265,10 +266,18 @@ function cronControls() {
     s.cron_kind === "custom" && el("label", { class: "field", for: "cron_expr" },
       el("span", { text: "Five fields: minute, hour, day of month, month, day of week" }),
       el("input", { id: "cron_expr", type: "text", value: s.cron_expr, placeholder: "0 1 * * 1-5", spellcheck: false, oninput: set("cron_expr") })),
-    el("label", { class: "field", for: "cron_name" },
-      el("span", { text: "Job name, used for the script file. Give each recurring capture its own." }),
-      el("input", { id: "cron_name", type: "text", value: s.cron_name, spellcheck: false, autocapitalize: "off", oninput: set("cron_name") })),
+    jobNameField(),
   ];
+}
+
+// The name that goes into the script file name (tcpdump_<name>.sh).
+function jobNameField() {
+  return el("label", { class: "field", for: "cron_name" },
+    el("span", { text: "Job name, used for the script file. Give each scheduled capture its own." }),
+    el("input", {
+      id: "cron_name", type: "text", value: state.cron_name, spellcheck: false, autocapitalize: "off",
+      oninput: (e) => { state.cron_name = e.target.value; changed(false); },
+    }));
 }
 
 function scheduleControls(which, off, offLabel, legend) {
@@ -277,18 +286,13 @@ function scheduleControls(which, off, offLabel, legend) {
   const unitKey = `${which}_unit`;
   const recurring = state.at_start === "cron";
   const modes = which === "at_start"
-    ? [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"], ["cron", "Repeat (cron)"]]
+    ? [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"]]
     : recurring
       ? [[off, "Let each run end by itself"], ["delay", "A set time after each start"]]
       : [[off, offLabel], ["time", "At a clock time"], ["date", "On a date and time"], ["delay", "After a delay"]];
   const pick = (value) => {
     state[which] = value;
     state[valueKey] = scheduleDefault(value);
-    // A recurring capture can only be stopped by a delay after each start.
-    if (which === "at_start" && value === "cron" && state.at_stop !== "delay") {
-      state.at_stop = "none";
-      state.at_stop_value = "";
-    }
     changed(true);
   };
   const onValue = (e) => { state[valueKey] = e.target.value; changed(false); };
@@ -405,8 +409,26 @@ function renderForm() {
 
   const schedule = section("schedule", "Schedule",
     el("p", { class: "desc", text: "Start the capture later with the at command, or repeat it with cron, instead of starting it straight away. The stop can be scheduled as well." }),
-    scheduleControls("at_start", "now", "Start now", "Start"),
-    s.at_start === "cron" && cronControls(),
+    el("label", { class: "check", for: "recurring" },
+      el("input", {
+        id: "recurring", type: "checkbox", checked: s.at_start === "cron",
+        onchange: (e) => {
+          s.at_start = e.target.checked ? "cron" : "now";
+          s.at_start_value = "";
+          // A recurring capture can only be stopped by a delay after each start.
+          if (e.target.checked && s.at_stop !== "delay") {
+            s.at_stop = "none";
+            s.at_stop_value = "";
+          }
+          changed(true);
+        },
+      }),
+      el("span", { text: "Recurring capture (repeat with cron)" })),
+    s.at_start === "cron" ? cronControls() : scheduleControls("at_start", "now", "Start now", "Start"),
+    ["time", "date", "delay"].includes(s.at_start) && [
+      check("at_script", "Put the capture in a script file and queue that, instead of the command itself", "at_script"),
+      s.at_script && jobNameField(),
+    ],
     scheduleControls("at_stop", "none", "Stop manually", "Stop"),
     s.at_start === "cron"
       ? t.cron_note && el("p", { class: "desc", text: t.cron_note })

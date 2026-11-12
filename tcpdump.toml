@@ -80,6 +80,19 @@ warn = "#f0c060"
 link_speeds_gbit = [1, 10, 25, 40, 100]
 default_link_speed_gbit = 10
 
+# Link speed implied by an interface name: the prefix followed by a number,
+# so "ix" matches ix0 but not ixl0. Names not listed here (lagg0, or drivers
+# that come in several speeds such as ixl, cxl, mce and ice) use the speed
+# picked in the estimate box instead. Add your own as needed.
+interface_speeds = [
+  { prefix = "em", gbit = 1 },
+  { prefix = "igb", gbit = 1 },
+  { prefix = "ix", gbit = 10 },
+  { prefix = "bxe", gbit = 10 },
+  { prefix = "cxgb", gbit = 10 },
+  { prefix = "mlxen", gbit = 40 },
+]
+
 # ---------------------------------------------------------------------------
 # Targets: the systems a command can be generated for.
 #
@@ -92,6 +105,10 @@ default_link_speed_gbit = 10
 # Scheduling: `at_command` queues the job, `at_log_redirect` replaces
 # `log_redirect` inside a job (jobs run under /bin/sh), and `at_note` is shown
 # next to the schedule settings.
+#
+# Queuing from a script: `at_script_install` writes the capture into a script
+# and queues that file ({dir} {script} {command} {at} {spec}); `script_remove`
+# deletes it ({script}).
 #
 # Recurring captures: `cron_install` writes the capture into a script and
 # adds one crontab line ({dir} {script} {expr} {command}); `cron_remove`
@@ -147,6 +164,14 @@ at_list = "sudo atq"
 at_show = "sudo at -c <job number>"
 at_remove = "sudo atrm <job number>"
 cron_dir = "/usr/local/sbin"
+at_script_install = """
+sudo tee {script} >/dev/null <<'EOF'
+#!/bin/sh
+{command}
+EOF
+sudo chmod +x {script}
+{at} -f {script} {spec}"""
+script_remove = "sudo rm -f {script}"
 cron_install = """
 sudo tee {script} >/dev/null <<'EOF'
 #!/bin/sh
