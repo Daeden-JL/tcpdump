@@ -255,7 +255,8 @@ textarea#command { white-space: pre-wrap; }
 }
 #fill .field code { font-weight: 700; color: var(--accent); }
 #fill input { background: var(--panel); }
-.leave-open { margin: -4px 0 8px; color: var(--muted); }
+.leave-open { margin: -4px 0 10px; font-size: 0.85rem; color: var(--muted); }
+.leave-open code { color: var(--accent); }
 #manage { margin: 14px 0 4px; padding-top: 12px; border-top: 1px solid var(--line); }
 #manage-list { list-style: none; margin: 8px 0 0; padding: 0; font-size: 0.87rem; color: var(--muted); }
 #manage-list li { margin-bottom: 10px; }

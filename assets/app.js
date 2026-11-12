@@ -178,26 +178,46 @@ function changed(rerender) {
   timer = setTimeout(refresh, rerender ? 0 : 150);
 }
 
-// `token` is a placeholder such as "<interface>" that this field accepts;
-// a small button offers to leave the value open for whoever gets the link.
+// What each field held before its placeholder toggle was switched on, so
+// switching it off puts the value back.
+const beforePlaceholder = {};
+
+// `token` is a placeholder such as "<interface>" that this field accepts.
+// A toggle under the field inserts it (leaving the value open for whoever
+// gets the link) and takes it out again. `append` adds the placeholder to
+// what is already typed instead of replacing it.
 function textField(id, label, key, hint, token, append) {
+  let toggle = null;
   const field = el("label", { class: "field", for: id },
     el("span", { text: label }),
     el("input", {
       id, type: "text", value: state[key], placeholder: hint || "", spellcheck: false,
       autocapitalize: "off",
-      oninput: (e) => { state[key] = e.target.value; changed(false); },
+      oninput: (e) => {
+        state[key] = e.target.value;
+        if (toggle) toggle.checked = state[key].includes(token);
+        changed(false);
+      },
     }));
-  if (!token || state[key].includes(token)) return field;
-  return [field, el("button", {
-    type: "button", class: "chip leave-open", text: `Leave open as ${token}`,
-    title: "Whoever opens the link fills this in",
-    onclick: () => {
+  if (!token) return field;
+  toggle = el("input", {
+    id: `${id}-open`, type: "checkbox", role: "switch", checked: state[key].includes(token),
+    onchange: (e) => {
       const current = state[key].trim();
-      state[key] = append && current ? `${current}, ${token}` : token;
+      if (e.target.checked) {
+        beforePlaceholder[key] = current;
+        state[key] = append && current ? `${current}, ${token}` : token;
+      } else {
+        // Take the placeholder out; if nothing is left, put back what was there before.
+        const rest = current.split(token).join("").split(",").map((p) => p.trim()).filter(Boolean).join(", ");
+        const earlier = beforePlaceholder[key] || "";
+        state[key] = rest || (earlier.includes(token) ? "" : earlier) || (key === "ifaces" ? target().default_interface : "");
+      }
       changed(true);
     },
-  })];
+  });
+  return [field, el("label", { class: "check leave-open", for: `${id}-open`, title: "Whoever opens the link is asked to fill this in" },
+    toggle, el("span", {}, "Leave open as ", el("code", { text: token }), " for whoever opens the link"))];
 }
 
 function check(id, label, key) {
