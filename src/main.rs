@@ -84,6 +84,15 @@ fn watch_config(app: Arc<App>) -> notify::Result<()> {
     Ok(())
 }
 
+/// The app version shown on the page: the Cargo version, plus the commit the
+/// binary was built from when that was known at build time.
+fn app_version() -> String {
+    match env!("TCPDUMP_DEV_COMMIT") {
+        "" => format!("v{}", env!("CARGO_PKG_VERSION")),
+        commit => format!("v{} ({commit})", env!("CARGO_PKG_VERSION")),
+    }
+}
+
 async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
     let (cfg, error) = {
         let live = app.live.read().unwrap();
@@ -99,6 +108,7 @@ async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
         .collect();
     no_cache(Json(json!({
         "generation": *app.generation.borrow(),
+        "app_version": app_version(),
         "error": error,
         "version": cfg.version,
         "site": cfg.site,
@@ -265,7 +275,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!("serving {} on http://{listen}", app.path.display());
+    println!("tcpdump-dev {} serving {} on http://{listen}", app_version(), app.path.display());
     tokio::select! {
         r = axum::serve(listener, router) => { if let Err(e) = r { eprintln!("server error: {e}"); } }
         _ = shutdown_signal() => {}
@@ -275,6 +285,14 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_version_is_the_cargo_version_with_an_optional_commit() {
+        let v = app_version();
+        assert!(v.starts_with(concat!("v", env!("CARGO_PKG_VERSION"))), "{v}");
+        let commit = v.split_once(" (").map(|(_, c)| c.trim_end_matches(')'));
+        assert!(commit.is_none_or(|c| c.len() == 7 && c.chars().all(|ch| ch.is_ascii_hexdigit())), "{v}");
+    }
 
     #[test]
     fn page_references_fingerprinted_assets_only() {

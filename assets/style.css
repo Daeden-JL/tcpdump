@@ -177,7 +177,8 @@ footer p { margin: 0 0 6px; }
 .links { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 a { color: var(--accent); }
 fieldset, #examples-section { scroll-margin-top: 12px; }
-#sections, #side-links { display: none; }
+#sections, #side-links, #side-version { display: none; }
+.app-version { font: 0.8rem var(--mono); color: var(--muted); }
 
 /* Wide screens: the title becomes a navigation panel pinned to the left. */
 @media (min-width: 1200px) {
@@ -204,7 +205,9 @@ fieldset, #examples-section { scroll-margin-top: 12px; }
     font-size: 0.93rem;
   }
   #sections a:hover { background: var(--soft); color: var(--accent); }
-  #side-links { display: flex; flex-direction: column; gap: 6px; margin: auto 0 0; padding: 12px 10px 0; font-size: 0.85rem; }
+  #side-version { display: block; margin: auto 0 0; padding: 12px 10px 0; }
+  #side-links { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0 10px; font-size: 0.85rem; }
+  footer #version { display: none; }
   footer #links { display: none; }
 }
 @media (prefers-reduced-motion: no-preference) {
