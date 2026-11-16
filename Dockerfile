@@ -1,4 +1,6 @@
 FROM rust:1-slim AS build
+# git lets the build record which commit it came from (shown on the page).
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
 RUN cargo build --release --locked

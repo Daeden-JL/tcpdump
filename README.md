@@ -43,6 +43,10 @@ can cache them indefinitely and a new build is never shown with old styling.
 The page itself is served with `Cache-Control: no-store`; if you put a CDN in
 front, do not configure it to cache HTML.
 
+The page shows the app version above the repository link: the version from
+`Cargo.toml`, plus the short git commit the binary was built from when git
+was available at build time (for example `v1.0.3 (fecb28f)`).
+
 ## Configuration
 
 [`tcpdump.toml`](tcpdump.toml) is commented throughout. The main parts:

@@ -709,6 +709,7 @@ async function loadConfig() {
   const links = [[config.site.repo, "Source code"], [config.site.license, "License"]]
     .filter(([l]) => l && l.enabled && l.url)
     .map(([l, fallback]) => el("a", { href: l.url, rel: "noopener", text: l.label || fallback }));
+  for (const box of [$("#version"), $("#side-version")]) box.textContent = config.app_version || "";
   for (const box of [$("#links"), $("#side-links")]) {
     box.hidden = !links.length;
     box.replaceChildren(...links.map((a) => a.cloneNode(true)));
