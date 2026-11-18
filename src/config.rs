@@ -260,6 +260,9 @@ pub struct Target {
     /// Shell expression listing every interface, used in a `for` loop.
     #[serde(default)]
     pub all_interfaces: Option<String>,
+    /// Name of the "all interfaces" choice on the page and in the summary.
+    #[serde(default = "d_all_label")]
+    pub all_interfaces_label: String,
     /// A pseudo-interface that captures on everything (Linux `any`).
     #[serde(default)]
     pub any_interface: Option<String>,
@@ -428,6 +431,9 @@ fn d_cron_remove() -> String {
 }
 fn d_cron_list() -> String {
     "crontab -l".into()
+}
+fn d_all_label() -> String {
+    "All interfaces".into()
 }
 fn d_at_command() -> String {
     "at".into()

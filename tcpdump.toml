@@ -142,6 +142,7 @@ at_note = "The job is queued on the node where you paste the command and runs th
 cron_note = "The cron job is added for the user and on the node where you paste the command; the script is on /ifs, so any node can read it. Cron runs the script under /bin/sh."
 default_interface = "lagg0"
 interface_hint = "e.g. lagg0, or several: bxe0, bxe1"
+all_interfaces_label = "All interfaces (external)"
 # Lists the external interfaces: every interface with an "ether" line, minus
 # lagg member ports, loopback and the internal (back-end) interfaces.
 all_interfaces = '`ifconfig | grep -B3 ether | grep flags | egrep -v "laggport|lo0|ISIINTERNAL" | cut -d: -f1`'

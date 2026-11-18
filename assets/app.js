@@ -453,7 +453,7 @@ function renderForm() {
   const where = section("where", "Where to capture",
     t.cluster && radios("scope", "scope", [["node", "This node"], ["all", "All nodes"], ["nodes", "Selected nodes"]]),
     t.cluster && s.scope === "nodes" && textField("nodes", "Node numbers", "nodes", t.cluster.nodes_hint, "<nodes>"),
-    radios("iface_mode", "iface_mode", [["named", "Named interface(s)"], ...(canAll ? [["all", "All interfaces"]] : [])]),
+    radios("iface_mode", "iface_mode", [["named", "Named interface(s)"], ...(canAll ? [["all", t.all_interfaces_label]] : [])]),
     s.iface_mode === "named" && textField("ifaces", "Interface(s), comma separated", "ifaces", t.interface_hint, "<interface>"));
 
   const dirPreview = [t.output_dir, s.subdir.trim().replace(/^\/+|\/+$/g, ""), s.dated ? t.date_subdir : ""].filter(Boolean).join("/");
