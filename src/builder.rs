@@ -1149,7 +1149,7 @@ fn summarize(cfg: &Config, st: &State, target: &Target, dir: &str, background: b
     let mut lines = Vec::new();
 
     // Where.
-    let ifaces = if st.iface_mode == "all" { "every interface".to_string() } else { word_list(&st.ifaces, "and") };
+    let ifaces = if st.iface_mode == "all" { target.all_interfaces_label.to_lowercase() } else { word_list(&st.ifaces, "and") };
     let nodes = match st.scope.as_str() {
         "all" => " on every node".to_string(),
         "nodes" => format!(" on node{} {}", if st.nodes.contains([',', '-', '<']) { "s" } else { "" }, st.nodes),
@@ -1847,7 +1847,7 @@ mod tests {
 
         let o = run("v=1&t=linux&im=all&w=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000");
         assert_eq!(o.summary, [
-            "Captures on every interface.",
+            "Captures on all interfaces.",
             "Only traffic matching \"ether[12:2]=0x88cc or ether[20:2]=0x2000\".",
             "Prints packets to the screen; nothing is saved.",
             "Stops after 1 packet.",
@@ -1861,6 +1861,7 @@ mod tests {
         assert_eq!(o.summary[5], "Runs at 22:15 on Monday, Friday. Installed as a cron job that runs a script.");
         assert_eq!(o.summary[6], "Each run is stopped after 1 hour 30 minutes.");
 
+        assert_eq!(run("v=1&sc=all&im=all&w=0").summary[0], "Captures on all interfaces (external) on every node.");
         // No summary while there is no command.
         assert!(run("v=1&f.s=abc").summary.is_empty());
         // A filled-in placeholder is described by its value.
