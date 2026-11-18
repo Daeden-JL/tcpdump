@@ -484,6 +484,16 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
                     let list = rest[..end].trim();
                     if list.starts_with('`') || list.starts_with("$(") {
                         all = true;
+                        // The builder always writes the configured expression, so say
+                        // so when the one in the text is different.
+                        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+                        if let Some(configured) = target.all_interfaces.as_ref().filter(|_| target.any_interface.is_none()) {
+                            if squash(list) != squash(configured) {
+                                notes.push(format!(
+                                    "The command lists interfaces with {list} but the builder always uses its configured list, {configured}. Change all_interfaces in the config to use a different one."
+                                ));
+                            }
+                        }
                     } else {
                         names = list
                             .trim_matches(['{', '}'])
@@ -662,6 +672,15 @@ mod tests {
         .unwrap();
         assert_eq!((get(&p, "sc"), get(&p, "im"), get(&p, "if")), (Some("all"), Some("all"), None));
         assert_eq!((get(&p, "f.C"), get(&p, "f.W")), (Some("500"), Some("5")));
+        // The older -B2 list is not what the builder writes, and Parse says so
+        // instead of swapping it silently.
+        assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+        assert!(p.notes[0].contains("grep -B2 ether") && p.notes[0].contains("grep -B3 ether"));
+        let rebuilt = build(&cfg(), &p.pairs).command;
+        assert!(rebuilt.contains(r#"for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v "laggport|lo0|ISIINTERNAL" | cut -d: -f1`; do"#), "{rebuilt}");
+        // The configured list, with different spacing, parses back with no note.
+        let same = rebuilt.replace("| grep flags |", "|  grep flags  |");
+        assert!(parse(&cfg(), &same, "").unwrap().notes.is_empty());
     }
 
     #[test]
