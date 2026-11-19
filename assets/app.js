@@ -727,7 +727,7 @@ async function sendFeedback() {
     try {
       const res = await fetch("api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected, report }) });
       const answer = await res.json().catch(() => ({}));
-      status(answer.message || (res.ok ? "Thank you. Your report was saved." : "The report could not be saved."));
+      status(answer.message || (res.ok ? "Thank you. Your report was sent." : "The report could not be saved."));
       if (res.ok) {
         $("#feedback-cancel").textContent = "Close";
         return;

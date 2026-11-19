@@ -208,7 +208,7 @@ async fn api_feedback(State(app): State<Arc<App>>, headers: HeaderMap, body: Str
         .open(&path)
         .and_then(|mut f| writeln!(f, "{}", feedback_line(&expected, &report, secs)));
     match saved {
-        Ok(()) => reply(StatusCode::OK, "Thank you. Your report was saved."),
+        Ok(()) => reply(StatusCode::OK, "Thank you. Your report was sent."),
         Err(e) => {
             eprintln!("cannot write feedback to {}: {e}", path.display());
             reply(StatusCode::INTERNAL_SERVER_ERROR, "The report could not be saved on the server.")
