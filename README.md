@@ -45,7 +45,7 @@ front, do not configure it to cache HTML.
 
 The page shows the app version above the repository link: the version from
 `Cargo.toml`, plus the short git commit the binary was built from when git
-was available at build time (for example `v1.0.4 (fecb28f)`).
+was available at build time (for example `v1.0.7 (fecb28f)`).
 
 ## Configuration
 
