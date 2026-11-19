@@ -304,6 +304,15 @@ pub struct Target {
     /// Shell expression listing every interface, used in a `for` loop.
     #[serde(default)]
     pub all_interfaces: Option<String>,
+    /// Name of the text file that printed output is saved to: {hostname} {iface}.
+    #[serde(default = "d_text_name")]
+    pub text_name: String,
+    /// Redirect that saves printed output: {file}.
+    #[serde(default = "d_text_redirect")]
+    pub text_redirect: String,
+    /// The capture command wrapped so it gives up by itself: {seconds} {command}.
+    #[serde(default = "d_timeout_wrap")]
+    pub timeout_wrap: String,
     /// Default for `{exclude}` in `all_interfaces`: the interface names (an
     /// egrep pattern, parts separated by `|`) that are left out. Editable on
     /// the page.
@@ -483,6 +492,15 @@ fn d_cron_list() -> String {
 }
 fn d_all_label() -> String {
     "All interfaces".into()
+}
+fn d_text_name() -> String {
+    "{hostname}_{iface}.txt".into()
+}
+fn d_text_redirect() -> String {
+    "> {file}".into()
+}
+fn d_timeout_wrap() -> String {
+    "timeout {seconds} {command}".into()
 }
 fn d_at_command() -> String {
     "at".into()

@@ -55,6 +55,10 @@ pub struct State {
     pub free_space: String,
     /// Interface names left out of "all interfaces" (an egrep pattern).
     pub iface_exclude: String,
+    /// When not writing a capture file: save the printed packets to a text file.
+    pub text_out: bool,
+    /// Seconds after which the capture gives up by itself; empty for no limit.
+    pub timeout: String,
     /// Recurring capture (start mode "cron"): kind is "daily", "weekdays",
     /// "hours" or "custom".
     pub cron_kind: String,
@@ -268,7 +272,7 @@ fn placeholder_uses(st: &State) -> Vec<(String, Use)> {
     if st.scope == "nodes" {
         uses.extend(placeholders_in(&st.nodes).into_iter().map(|p| (p, Use::Nodes)));
     }
-    if st.write {
+    if st.write || st.text_out {
         uses.extend(placeholders_in(&st.subdir).into_iter().map(|p| (p, Use::Subdir)));
     }
     uses.extend(placeholders_in(&st.raw).into_iter().map(|p| (p, Use::Raw)));
@@ -345,6 +349,13 @@ pub fn valid_exclude(s: &str) -> bool {
 /// Whether the "all interfaces" list of this target has an editable exclusion.
 fn has_exclude(target: &Target) -> bool {
     target.any_interface.is_none() && target.all_interfaces.as_ref().is_some_and(|a| a.contains("{exclude}"))
+}
+
+const MAX_TIMEOUT: u128 = 31 * 86400;
+
+/// The timeout in seconds, when one is set and usable.
+fn timeout_seconds(st: &State) -> Option<u128> {
+    st.timeout.parse::<u128>().ok().filter(|n| (1..=MAX_TIMEOUT).contains(n))
 }
 
 fn valid_iface(s: &str) -> bool {
@@ -686,6 +697,10 @@ pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
         changes.push(format!("Interfaces to leave out ({}) reset to {}.", shown(&st.iface_exclude), target.all_interfaces_exclude));
         st.iface_exclude = target.all_interfaces_exclude.clone();
     }
+    if !st.timeout.is_empty() && timeout_seconds(&st).is_none() {
+        changes.push(format!("Time limit {:?} removed.", st.timeout));
+        st.timeout.clear();
+    }
     if !st.subdir.is_empty() && !valid_subdir(&st.subdir) {
         changes.push(format!("Subfolder {:?} removed.", st.subdir));
         st.subdir.clear();
@@ -838,6 +853,8 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
             Some(given) => given.trim().to_string(),
             None => target.all_interfaces_exclude.clone(),
         },
+        text_out: flag_on("to", false),
+        timeout: get("tm").trim().to_string(),
         cron_kind: match get("ck") {
             k @ ("weekdays" | "hours" | "custom") => k.to_string(),
             _ => "daily".to_string(),
@@ -984,6 +1001,25 @@ fn interface_speed(cfg: &Config, name: &str) -> Option<u128> {
 /// Upper bound on what the capture writes. `looped_all` is true when the
 /// command loops over every interface, so their number is not in the command.
 fn estimate(cfg: &Config, st: &State, looped_all: bool, cx: &mut Ctx) -> Estimate {
+    if !st.write && st.text_out {
+        let role = |r: Role| cfg.flags.iter().find(|f| f.role == Some(r)).is_some_and(|f| st.flags.contains_key(f.key()));
+        let capped = role(Role::PacketCount) || timeout_seconds(st).is_some();
+        if !capped {
+            cx.warn("estimate", "The text file has no limit and can fill the drive: it grows for as long as packets are printed. Set a packet count or a time limit.");
+        }
+        return Estimate {
+            kind: if capped { "none" } else { "unbounded" },
+            headline: if capped { "A small text file per interface".into() } else { "No upper limit".into() },
+            lines: vec![if capped {
+                "Printed packets are saved as text. The size depends on what is printed, and the packet count or time limit keeps it small.".into()
+            } else {
+                "Printed packets are saved as text, and nothing stops the capture, so the file keeps growing.".into()
+            }],
+            need_nodes: false,
+            need_ifaces: false,
+            need_link: false,
+        };
+    }
     if !st.write {
         return Estimate {
             kind: "none",
@@ -1006,12 +1042,20 @@ fn estimate(cfg: &Config, st: &State, looped_all: bool, cx: &mut Ctx) -> Estimat
 
     // The limit for one capture on a link of `speed` Gbit/s: (bytes, kind).
     // Several limits can apply; the smallest wins.
-    let timed = seconds.zip(count).filter(|_| size_mb.is_none()).map(|(secs, n)| secs * n);
+    // How long the capture can run: rotation by time, or the time limit, whichever is shorter.
+    let rotated = seconds.zip(count).filter(|_| size_mb.is_none()).map(|(secs, n)| secs * n);
+    let limit_secs = timeout_seconds(st);
+    let by_timeout = limit_secs.is_some_and(|t| rotated.is_none_or(|r| t < r));
+    let timed = match (rotated, limit_secs) {
+        (Some(r), Some(t)) => Some(r.min(t)),
+        (r, t) => r.or(t),
+    };
     let limit = |speed: u128| -> Option<(u128, &'static str)> {
         let mut limits = Vec::new();
         if let (Some(mb), Some(n)) = (size_mb, count) {
             limits.push((mb * 1_000_000 * n, "exact"));
-        } else if let Some(duration) = timed {
+        }
+        if let Some(duration) = timed {
             limits.push((speed * 1_000_000_000 / 8 * 2 * duration, "worst"));
         }
         if let Some(n) = packets {
@@ -1060,9 +1104,10 @@ fn estimate(cfg: &Config, st: &State, looped_all: bool, cx: &mut Ctx) -> Estimat
     let mut lines: Vec<String> = Vec::new();
     match (kind, timed) {
         ("worst", Some(duration)) => {
+            let why = if by_timeout { "the time limit".to_string() } else { format!("{} × {}", name(Role::RotateSeconds), name(Role::FileCount)) };
             lines.push(format!(
-                "The capture runs for {} ({} × {}). The size depends on the traffic; this assumes every link completely full in both directions the whole time, so real captures are normally far smaller.",
-                human_duration(duration), name(Role::RotateSeconds), name(Role::FileCount)
+                "The capture runs for {} ({why}). The size depends on the traffic; this assumes every link completely full in both directions the whole time, so real captures are normally far smaller.",
+                human_duration(duration)
             ));
             if let Some(s) = snap.filter(|s| *s < FULL_FRAME) {
                 let (whole, per) = match per_node {
@@ -1215,11 +1260,16 @@ fn summarize(cfg: &Config, st: &State, target: &Target, dir: &str, background: b
             (None, Some(s), None) => format!("Starts a new file every {} and keeps going until it is stopped.", human_duration(s)),
             _ => "Writes one file per interface, which grows until the capture is stopped.".to_string(),
         });
+    } else if st.text_out {
+        lines.push(format!("Saves the printed packets as text to {dir}, one file per interface."));
     } else {
         lines.push("Prints packets to the screen; nothing is saved.".to_string());
     }
     if let Some(n) = packets {
         lines.push(format!("Stops after {}.", plural(n, "packet")));
+    }
+    if let Some(seconds) = timeout_seconds(st) {
+        lines.push(format!("Gives up after {} if it has not finished by then.", human_duration(seconds)));
     }
     match (background, st.write && st.log) {
         (true, true) => lines.push("Runs in the background, with tcpdump's own messages saved to a .log file beside the capture.".into()),
@@ -1320,7 +1370,16 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
 
     // Flags, in the order the config lists them.
     let enabled = |name: &str| st.flags.contains_key(name.trim_start_matches('-'));
-    let mut cmd = format!("{} -i {iface}", target.command);
+    let program = match timeout_seconds(&st) {
+        Some(seconds) => render(&target.timeout_wrap, &[("seconds", &seconds.to_string()), ("command", &target.command)]),
+        None => {
+            if !st.timeout.is_empty() {
+                cx.error("timeout", "Enter the time limit as a whole number of seconds, from 1 to 2678400 (31 days), or leave it empty.");
+            }
+            target.command.clone()
+        }
+    };
+    let mut cmd = format!("{program} -i {iface}");
     for f in cfg.flags.iter().filter(|f| st.flags.contains_key(f.key())) {
         let value = &st.flags[f.key()];
         check_flag(f, value, &enabled, &mut cx);
@@ -1332,7 +1391,10 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         }
     }
 
-    // Output file, log and backgrounding only apply when writing to disk.
+    // Output file, log and backgrounding only apply when something is saved:
+    // a capture file, or the printed packets as text.
+    let text_out = !st.write && st.text_out;
+    let saving = st.write || text_out;
     let mut dir = target.output_dir.clone();
     if !st.subdir.is_empty() {
         if !valid_subdir(&st.subdir) {
@@ -1343,7 +1405,7 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
     if st.dated {
         dir = format!("{dir}/{}", target.date_subdir);
     }
-    let background = st.write && st.background;
+    let background = saving && st.background;
     if st.write {
         let timestamp = if target.strftime_flags.iter().any(|f| enabled(f)) {
             &target.strftime_timestamp
@@ -1352,8 +1414,8 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         };
         let vars = [("hostname", target.hostname.as_str()), ("timestamp", timestamp.as_str()), ("iface", iface.as_str())];
         cmd.push_str(&format!(" -w {dir}/{}", render(&target.file_name, &vars)));
-    } else if scope != "node" || loop_list.is_some() {
-        cx.warn("write", "Printing packets from several interfaces or nodes at once is hard to read; consider writing to a file.");
+    } else if !text_out && (scope != "node" || loop_list.is_some()) {
+        cx.warn("write", "Printing packets from several interfaces or nodes at once is hard to read; consider saving them to a file.");
     }
 
     let filter = build_filter(cfg, &st, &mut cx);
@@ -1368,6 +1430,12 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         // An `at` job runs under /bin/sh, which does not understand `&>>`.
         let redirect = if st.at_start == "now" { &target.log_redirect } else { &target.at_log_redirect };
         cmd.push_str(&render(redirect, &[("log", &log), ("dir", &dir)]));
+    }
+    if text_out {
+        let vars = [("hostname", target.hostname.as_str()), ("iface", iface.as_str())];
+        let file = format!("{dir}/{}", render(&target.text_name, &vars));
+        cmd.push(' ');
+        cmd.push_str(&render(&target.text_redirect, &[("file", &file), ("dir", &dir)]));
     }
     if background {
         cmd.push_str(" &");
@@ -1395,7 +1463,7 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         cx.error("nodes", "List the node numbers, e.g. 1,2,5 or 1-4.");
     }
     cmd = wrap(&cmd, &mut cx);
-    if st.write {
+    if saving {
         cmd = format!("{}; {cmd}", render(&target.prepare, &[("dir", &dir)]));
     }
 
@@ -1430,8 +1498,8 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         } else {
             job(spec, &cmd)
         };
-        if !st.write {
-            cx.warn("at_start_value", "A scheduled capture has no screen to print to; turn on \"Write packets to a file\".");
+        if !saving {
+            cx.warn("at_start_value", "A scheduled capture has no screen to print to; write a capture file or save the printed packets to a text file.");
         }
     }
     if let Some(spec) = &stop_spec {
@@ -1469,13 +1537,13 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
             None => cmd.clone(),
         };
         cmd = render(&target.cron_install, &[("dir", &script_dir), ("script", &script), ("expr", &expr), ("command", &body)]);
-        if !st.write {
-            cx.warn("at_start_value", "A scheduled capture has no screen to print to; turn on \"Write packets to a file\".");
+        if !saving {
+            cx.warn("at_start_value", "A scheduled capture has no screen to print to; write a capture file or save the printed packets to a text file.");
         }
         let role = |r: Role| cfg.flags.iter().find(|f| f.role == Some(r)).is_some_and(|f| st.flags.contains_key(f.key()));
-        let ends = role(Role::PacketCount) || (role(Role::RotateSeconds) && role(Role::FileCount) && !role(Role::FileSizeMb));
+        let ends = timeout_seconds(&st).is_some() || role(Role::PacketCount) || (role(Role::RotateSeconds) && role(Role::FileCount) && !role(Role::FileSizeMb));
         if !ends && stop_delay.is_none() {
-            cx.warn("cron", "This capture does not end by itself, so every run would start another one on top of it. Rotate by time with a file count, set a packet count, or add a stop delay.");
+            cx.warn("cron", "This capture does not end by itself, so every run would start another one on top of it. Rotate by time with a file count, set a packet count or a time limit, or add a stop delay.");
         }
         if st.write {
             cx.warn("cron", "A recurring capture adds files on every run and can fill the drive over time. Delete old captures regularly, and remove the cron job when you are done.");
@@ -1916,6 +1984,42 @@ mod tests {
         // It is not checked, or used, when interfaces are named or the system has "any".
         assert!(errors(&run("v=1&if=lagg0&ix=")).is_empty());
         assert_eq!(run("v=1&t=linux&im=all&w=0&ix=").command, "sudo tcpdump -i any");
+    }
+
+    #[test]
+    fn printed_output_can_be_saved_as_text_with_a_time_limit() {
+        // The reported LLDP/CDP sweep: every external interface, one packet each, give up after two minutes.
+        let o = run("v=1&im=all&ix=laggport|lo0|ISIINTERNAL|vlan|lagg&w=0&to=1&tm=120&dd=1&bg=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=(ether[12:2]=0x88cc or ether[20:2]=0x2000)");
+        assert!(errors(&o).is_empty(), "{:?}", o.issues);
+        assert_eq!(
+            o.command,
+            "mkdir -p /ifs/data/Isilon_Support/$(date +%F); for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1`; do \
+             timeout 120 tcpdump -i ${iface} -s 0 -c 1 -nn -v \"(ether[12:2]=0x88cc or ether[20:2]=0x2000)\" \
+             > /ifs/data/Isilon_Support/$(date +%F)/$(uname -n)_${iface}.txt; done"
+        );
+        assert!(o.summary.contains(&"Saves the printed packets as text to /ifs/data/Isilon_Support/$(date +%F), one file per interface.".to_string()));
+        assert!(o.summary.contains(&"Gives up after 2 minutes if it has not finished by then.".to_string()));
+        assert_eq!(o.estimate.as_ref().unwrap().headline, "A small text file per interface");
+        assert!(warnings(&o).is_empty(), "{:?}", o.issues);
+
+        // Text output with nothing to stop it is flagged; on Linux the wrapper keeps sudo first.
+        let o = run("v=1&t=linux&if=eth0&w=0&to=1&bg=1");
+        assert!(o.command.ends_with("sudo tcpdump -i eth0 > ~/tcpdump_capture/$(date +%F)/$(hostname -s)_eth0.txt &"), "{}", o.command);
+        assert!(warnings(&o).iter().any(|w| w.contains("text file has no limit")));
+        assert_eq!(run("v=1&t=linux&if=eth0&w=0&tm=30").command, "sudo timeout 30 tcpdump -i eth0");
+        // Writing a capture file takes precedence: no text redirect, and the time limit caps the estimate.
+        let o = run("v=1&if=ix0&w=1&to=1&tm=3600&lg=0&bg=0&f.s=0");
+        assert!(o.command.contains("timeout 3600 tcpdump -i ix0 -s 0 -w ") && !o.command.contains(".txt"));
+        let e = o.estimate.as_ref().unwrap();
+        assert_eq!(e.headline, "Worst case 9.0 TB");
+        assert!(e.lines[0].contains("1 hour (the time limit)"));
+        // A scheduled text capture is not warned about having no screen.
+        assert!(!warnings(&run("v=1&if=lagg0&w=0&to=1&tm=60&f.c=1&as=time&asv=01:00")).iter().any(|w| w.contains("no screen")));
+        for bad in ["tm=0", "tm=abc", "tm=120;reboot", "tm=99999999"] {
+            let q = format!("v=1&if=lagg0&w=0&{bad}");
+            assert!(!errors(&run(&q)).is_empty() && run(&q).command.is_empty(), "{bad}");
+            assert!(errors(&fix(&cfg(), &parse_query(&q)).output).is_empty(), "{bad}");
+        }
     }
 
     #[test]
