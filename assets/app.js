@@ -54,6 +54,8 @@ function serialise(skip = []) {
   p.push(["w", s.write ? "1" : "0"]);
   if (!s.write && s.text_out) p.push(["to", "1"]);
   if (s.timeout.trim()) p.push(["tm", s.timeout.trim()]);
+  if ((s.write || s.text_out) && s.pause.trim()) p.push(["sl", s.pause.trim()]);
+  if ((s.write || s.text_out) && s.file_name.trim()) p.push(["fn", s.file_name.trim()]);
   if (s.subdir.trim()) p.push(["sd", s.subdir.trim()]);
   p.push(["dd", s.dated ? "1" : "0"], ["lg", s.log ? "1" : "0"], ["bg", s.background ? "1" : "0"]);
   for (const f of visibleFlags()) {
@@ -478,6 +480,19 @@ function renderForm() {
     s.write && check("log", "Save tcpdump's messages to a .log file next to the capture", "log"),
     saving && check("background", "Run in the background", "background"),
     saving && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })),
+    saving && el("label", { class: "field", for: "file_name" },
+      el("span", {}, "File name (optional). Use ", el("code", { text: "{hostname}" }), ", ", el("code", { text: "{iface}" }), " and ", el("code", { text: "{timestamp}" }), " where those should go."),
+      el("input", {
+        id: "file_name", type: "text", value: s.file_name, spellcheck: false, autocapitalize: "off",
+        placeholder: s.write ? t.file_name : t.text_name,
+        oninput: (e) => { s.file_name = e.target.value; changed(false); },
+      })),
+    saving && el("label", { class: "field", for: "pause" },
+      el("span", { text: "Pause after creating the folder, in seconds (optional). Gives a new folder time to appear before the capture starts." }),
+      el("input", {
+        id: "pause", type: "number", min: 1, inputmode: "numeric", value: s.pause, placeholder: "e.g. 2",
+        oninput: (e) => { s.pause = e.target.value; changed(false); },
+      })),
     el("label", { class: "field", for: "timeout" },
       el("span", { text: "Give up after this many seconds (optional). Useful with a packet count, which otherwise waits for as long as it takes." }),
       el("input", {
@@ -544,7 +559,7 @@ function renderForm() {
 
 // ---- problems: flag the fields, offer a fix ---------------------------------
 
-const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name", "iface_exclude", "timeout"];
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name", "iface_exclude", "timeout", "pause", "file_name"];
 let lastIssues = [];
 let pendingFix = null;
 

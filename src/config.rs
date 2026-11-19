@@ -310,6 +310,9 @@ pub struct Target {
     /// Redirect that saves printed output: {file}.
     #[serde(default = "d_text_redirect")]
     pub text_redirect: String,
+    /// The pause between creating the folder and starting: {seconds}.
+    #[serde(default = "d_pause")]
+    pub pause: String,
     /// The capture command wrapped so it gives up by itself: {seconds} {command}.
     #[serde(default = "d_timeout_wrap")]
     pub timeout_wrap: String,
@@ -501,6 +504,9 @@ fn d_text_redirect() -> String {
 }
 fn d_timeout_wrap() -> String {
     "timeout {seconds} {command}".into()
+}
+fn d_pause() -> String {
+    "sleep {seconds}".into()
 }
 fn d_at_command() -> String {
     "at".into()
