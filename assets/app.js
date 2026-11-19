@@ -52,6 +52,8 @@ function serialise(skip = []) {
   if (s.iface_mode === "all" && hasExclude(target()) && s.iface_exclude !== target().all_interfaces_exclude) p.push(["ix", s.iface_exclude.trim()]);
   if (s.iface_mode === "named") p.push(["if", list(s.ifaces)]);
   p.push(["w", s.write ? "1" : "0"]);
+  if (!s.write && s.text_out) p.push(["to", "1"]);
+  if (s.timeout.trim()) p.push(["tm", s.timeout.trim()]);
   if (s.subdir.trim()) p.push(["sd", s.subdir.trim()]);
   p.push(["dd", s.dated ? "1" : "0"], ["lg", s.log ? "1" : "0"], ["bg", s.background ? "1" : "0"]);
   for (const f of visibleFlags()) {
@@ -466,14 +468,22 @@ function renderForm() {
       }),
     ]);
 
+  const saving = s.write || s.text_out;
   const dirPreview = [t.output_dir, s.subdir.trim().replace(/^\/+|\/+$/g, ""), s.dated ? t.date_subdir : ""].filter(Boolean).join("/");
   const output = section("output", "Output",
-    check("write", "Write packets to a file (off prints them to the screen)", "write"),
-    s.write && textField("subdir", `Subfolder under ${t.output_dir} (optional)`, "subdir", "e.g. a case number, NDMP, CIFS", "<case number>"),
-    s.write && check("dated", "Add a folder for today's date", "dated"),
+    check("write", "Write packets to a capture file (off prints them as text)", "write"),
+    !s.write && check("text_out", "Save the printed packets to a text file instead of showing them on the screen", "text_out"),
+    saving && textField("subdir", `Subfolder under ${t.output_dir} (optional)`, "subdir", "e.g. a case number, NDMP, CIFS", "<case number>"),
+    saving && check("dated", "Add a folder for today's date", "dated"),
     s.write && check("log", "Save tcpdump's messages to a .log file next to the capture", "log"),
-    s.write && check("background", "Run in the background", "background"),
-    s.write && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })));
+    saving && check("background", "Run in the background", "background"),
+    saving && el("p", { class: "desc" }, "Files go to ", el("code", { text: dirPreview })),
+    el("label", { class: "field", for: "timeout" },
+      el("span", { text: "Give up after this many seconds (optional). Useful with a packet count, which otherwise waits for as long as it takes." }),
+      el("input", {
+        id: "timeout", type: "number", min: 1, inputmode: "numeric", value: s.timeout, placeholder: "e.g. 120",
+        oninput: (e) => { s.timeout = e.target.value; changed(false); },
+      })));
 
   const schedule = section("schedule", "Schedule",
     el("p", { class: "desc", text: "Start the capture later with the at command, or repeat it with cron, instead of starting it straight away. The stop can be scheduled as well." }),
@@ -534,7 +544,7 @@ function renderForm() {
 
 // ---- problems: flag the fields, offer a fix ---------------------------------
 
-const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name", "iface_exclude"];
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name", "iface_exclude", "timeout"];
 let lastIssues = [];
 let pendingFix = null;
 
@@ -676,6 +686,7 @@ let lastParse = null; // what the last Parse was given and what it produced
 function setFeedback(info) {
   lastParse = info;
   $("#parse-feedback").hidden = !info || config.feedback.mode === "off";
+  $("#feedback-thanks").hidden = true;
 }
 
 function feedbackReport() {
@@ -727,11 +738,15 @@ async function sendFeedback() {
     try {
       const res = await fetch("api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected, report }) });
       const answer = await res.json().catch(() => ({}));
-      status(answer.message || (res.ok ? "Thank you. Your report was saved." : "The report could not be saved."));
       if (res.ok) {
-        $("#feedback-cancel").textContent = "Close";
+        // Sent: close the window and say so on the page, in place of the button.
+        $("#feedback-dialog").close();
+        $("#parse-feedback").hidden = true;
+        $("#feedback-thanks").textContent = answer.message || "Thank you. Your report was sent.";
+        $("#feedback-thanks").hidden = false;
         return;
       }
+      status(answer.message || "The report could not be saved.");
     } catch {
       status("The report could not be sent. Check your connection and try again.");
     }
@@ -904,7 +919,7 @@ async function main() {
   $("#parse-diff-close").addEventListener("click", () => { $("#parse-diff").hidden = true; });
   $("#parse-feedback").addEventListener("click", openFeedback);
   $("#feedback-send").addEventListener("click", () => sendFeedback().catch(console.error));
-  $("#feedback-cancel").addEventListener("click", () => { $("#feedback-dialog").close(); $("#feedback-cancel").textContent = "Cancel"; });
+  $("#feedback-cancel").addEventListener("click", () => $("#feedback-dialog").close());
   $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
   $("#fix-apply").addEventListener("click", applyFix);
   $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());

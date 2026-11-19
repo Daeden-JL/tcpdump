@@ -288,6 +288,7 @@ pre .diff-add { color: #7ff0bf; background: rgb(80 255 170 / 0.14); }
 pre .diff-move { opacity: 0.8; }
 pre del, pre ins { border-radius: 3px; padding: 0 2px; }
 #parse-feedback { margin: 0 0 12px; }
+#feedback-thanks { margin: 0 0 12px; font-weight: 650; color: var(--accent); }
 dialog textarea {
   width: 100%;
   padding: 8px 10px;

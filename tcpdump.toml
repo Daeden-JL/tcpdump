@@ -119,6 +119,9 @@ interface_speeds = [
 #   prepare              : {dir}
 #   log_redirect         : {log} {dir}
 #   cluster templates    : {command} {nodes}
+#   text_name            : {hostname} {iface}   (file for saved printed output)
+#   text_redirect        : {file}               (default "> {file}")
+#   timeout_wrap         : {seconds} {command}  (default "timeout {seconds} {command}")
 #
 # Scheduling: `at_command` queues the job, `at_log_redirect` replaces
 # `log_redirect` inside a job (jobs run under /bin/sh), and `at_note` is shown
@@ -182,6 +185,7 @@ output_dir = "~/tcpdump_capture"
 hostname = "$(hostname -s)"
 log_redirect = ">> {log} 2>&1"
 stop = "sudo pkill -INT tcpdump"
+timeout_wrap = "sudo timeout {seconds} tcpdump"
 at_command = "sudo at"
 at_note = "Needs the at package with atd running. The job is queued as root, so the capture folder ~ is root's home."
 at_list = "sudo atq"
@@ -516,6 +520,11 @@ query = "v=1&t=powerscale&sc=nodes&n=17&im=named&if=lagg0&w=1&dd=1&lg=0&bg=1&f.s
 title = "LLDP or CDP: which switch port is this interface on?"
 description = "Prints the next LLDP or CDP announcement seen on one interface, in full, then stops. Switches send these every 30 to 60 seconds, so allow up to a minute."
 query = "v=1&t=powerscale&sc=node&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.n=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
+
+[[examples]]
+title = "LLDP or CDP sweep of every external interface, saved as text"
+description = "Waits up to two minutes on each external interface of this node for one LLDP or CDP announcement and saves what it prints to a text file per interface."
+query = "v=1&t=powerscale&sc=node&im=all&w=0&to=1&tm=120&dd=1&bg=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
 
 [[examples]]
 title = "LLDP or CDP on every node"

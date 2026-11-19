@@ -208,7 +208,7 @@ async fn api_feedback(State(app): State<Arc<App>>, headers: HeaderMap, body: Str
         .open(&path)
         .and_then(|mut f| writeln!(f, "{}", feedback_line(&expected, &report, secs)));
     match saved {
-        Ok(()) => reply(StatusCode::OK, "Thank you. Your report was saved."),
+        Ok(()) => reply(StatusCode::OK, "Thank you. Your report was sent."),
         Err(e) => {
             eprintln!("cannot write feedback to {}: {e}", path.display());
             reply(StatusCode::INTERNAL_SERVER_ERROR, "The report could not be saved on the server.")
@@ -240,7 +240,7 @@ async fn api_parse(State(app): State<Arc<App>>, RawQuery(query): RawQuery, body:
             if let Some(path) = parsed.out_path.as_ref().filter(|p| !output.command.is_empty() && !braced(&output.command).contains(&braced(p))) {
                 let wrote_note = parsed.notes.iter().any(|n| n.contains("folder"));
                 if !wrote_note {
-                    parsed.notes.push(format!("The capture file is always named by the builder, so {path} was replaced with its standard name."));
+                    parsed.notes.push(format!("The output file is always named by the builder, so {path} was replaced with its standard name."));
                 }
             }
             json!({ "found": true, "notes": parsed.notes, "output": output })

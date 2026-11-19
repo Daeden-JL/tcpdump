@@ -149,6 +149,21 @@ confirm:
 - a flag that clashes with another, or lacks the flag it depends on, is switched off;
 - invalid interfaces, hosts, networks, ports, subfolders and filter text are removed.
 
+## Saving printed output, and a time limit
+
+With "Write packets to a capture file" off, tcpdump prints packets as text.
+**Save the printed packets to a text file** redirects that text to a file per
+interface in the capture folder (`text_name` and `text_redirect` in the TOML),
+creating the folder first.
+
+**Give up after this many seconds** wraps the capture in `timeout`
+(`timeout_wrap` in the TOML). It pairs well with a packet count: `-c 1` waits
+for as long as it takes, which is forever on an interface where the packet
+never arrives. A time limit also gives a capture file a worst-case size in
+the estimate.
+
+Parse reads both back, including a `timeout` inside a cluster wrapper.
+
 ## Scheduling with `at`
 
 The **Schedule** section queues the capture with `at` instead of starting it

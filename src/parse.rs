@@ -11,7 +11,8 @@ use crate::config::{Cluster, Config, Flag, Target, ValueType};
 pub struct Parsed {
     pub pairs: Vec<(String, String)>,
     pub notes: Vec<String>,
-    /// The `-w` path as it was written in the text, if there was one.
+    /// The output file as it was written in the text, if there was one: the
+    /// `-w` path, or the file printed output was redirected to.
     pub out_path: Option<String>,
 }
 
@@ -540,16 +541,22 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
                         all = true;
                         // The builder writes the configured list. Read back the names it
                         // leaves out when only those differ; otherwise say the list was replaced.
-                        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+                        // `$(...)` and backticks mean the same, so compare what is inside them.
+                        let squash = |s: &str| {
+                            let s = s.trim();
+                            let inner = s.strip_prefix("$(").and_then(|r| r.strip_suffix(')')).or_else(|| s.strip_prefix('`').and_then(|r| r.strip_suffix('`'))).unwrap_or(s);
+                            inner.split_whitespace().collect::<Vec<_>>().join(" ")
+                        };
                         if let Some(configured) = target.all_interfaces.as_ref().filter(|_| target.any_interface.is_none()) {
                             let typed = squash(list);
-                            let exclude = configured.split_once("{exclude}").and_then(|(before, after)| {
-                                typed.strip_prefix(squash(before).as_str())?.strip_suffix(squash(after).as_str()).map(str::to_string)
+                            let whole = squash(configured);
+                            let exclude = whole.split_once("{exclude}").and_then(|(before, after)| {
+                                typed.strip_prefix(before)?.strip_suffix(after).map(str::to_string)
                             });
                             match exclude {
                                 Some(pattern) => iface_exclude = Some(pattern),
-                                None if typed != squash(configured) => notes.push(format!(
-                                    "The command lists interfaces with {list} but the builder always uses its configured list, {}. Change all_interfaces in the config to use a different one.",
+                                None if typed != whole => notes.push(format!(
+                                    "The command lists interfaces with {list}, which the builder cannot reproduce. It uses its own list, {}; only the names it leaves out can be changed, in the \"Leave out interfaces\" field.",
                                     configured.replace("{exclude}", &target.all_interfaces_exclude)
                                 )),
                                 None => {}
@@ -588,10 +595,21 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         put("if", &names.join(","));
     }
 
-    // Output file: only the folder is read back; the file name is generated.
+    // What follows the command: a redirect and/or a lone & (background).
+    let end = [tail.find(';'), tail.find('\''), tail.find(" done")].into_iter().flatten().min().unwrap_or(tail.len());
+    let rest = ["&>>", "&>", "2>&1", ">&", "&&"].iter().fold(tail[..end].to_string(), |s, x| s.replace(x, " "));
+    let redirected = tail.starts_with('>') || tail.starts_with("&>");
+    // Without -w, a redirect saves the printed packets as text; with -w it is the log.
+    let text_path: Option<String> = (out_path.is_none() && redirected)
+        .then(|| scan(tail.trim_start_matches(['&', '>', ' ']), wrapped).tokens.into_iter().next().map(|t| t.0))
+        .flatten()
+        .filter(|p| p != "/dev/null");
+
+    // Only the folder of the output is read back; the file name is generated.
     let mut dated = target.dated_default;
-    if let Some(path) = &out_path {
-        let dir = path.rsplit_once('/').map_or("", |p| p.0);
+    if let Some(path) = out_path.as_ref().or(text_path.as_ref()) {
+        // %Y-%m-%d is the long way of writing %F.
+        let dir = path.rsplit_once('/').map_or("", |p| p.0).replace("%Y-%m-%d", "%F");
         let ds = target.date_subdir.as_str();
         match dir.strip_prefix(target.output_dir.as_str()) {
             Some(rest) => {
@@ -613,14 +631,28 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         }
     }
     put("w", if out_path.is_some() { "1" } else { "0" });
+    if text_path.is_some() {
+        put("to", "1");
+    }
     put("dd", if dated { "1" } else { "0" });
-
-    // What follows the command: a redirect means a log, a lone & means background.
-    let logged = tail.starts_with('>') || tail.starts_with("&>");
-    let end = [tail.find(';'), tail.find('\''), tail.find(" done")].into_iter().flatten().min().unwrap_or(tail.len());
-    let rest = ["&>>", "&>", "2>&1", ">&", "&&"].iter().fold(tail[..end].to_string(), |s, x| s.replace(x, " "));
-    put("lg", if logged { "1" } else { "0" });
+    put("lg", if out_path.is_some() && redirected { "1" } else { "0" });
     put("bg", if rest.contains('&') { "1" } else { "0" });
+
+    // `timeout 120 tcpdump ...` (with sudo on either side of it).
+    let mut before = text[..start - "tcpdump".len()].split_whitespace().rev().filter(|w| *w != "sudo");
+    // The word may carry the opening quote of a wrapper: 'timeout 60 tcpdump ...'
+    let (seconds, word) = (before.next(), before.next().map(|w| w.trim_start_matches(['\'', '"', '('])));
+    if let (Some(seconds), Some("timeout")) = (seconds, word) {
+        if seconds.bytes().all(|c| c.is_ascii_digit()) {
+            put("tm", seconds);
+        } else {
+            notes.push(format!("The time limit \"timeout {seconds}\" is not a plain number of seconds and was left out."));
+        }
+    }
+    // A pause before the capture is not something the builder writes.
+    for part in text[..start].split(';').map(str::trim).filter(|p| p.starts_with("sleep ")) {
+        notes.push(format!("\"{part}\" before the capture is not something the builder writes and was left out."));
+    }
 
     for (k, v) in &set_flags {
         if !pairs.iter().any(|(pk, _)| pk == &format!("f.{k}")) {
@@ -642,7 +674,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         }
     }
     pairs.extend(schedule);
-    Some(Parsed { pairs, notes, out_path })
+    Some(Parsed { pairs, notes, out_path: out_path.or(text_path) })
 }
 
 #[cfg(test)]
@@ -815,6 +847,57 @@ mod tests {
         // Inside an isi_for_array wrapper the closing quote still ends the command.
         let p = parse(&cfg(), "isi_for_array -X 'tcpdump -ni lagg0 -c1 port 53' &", "").unwrap();
         assert_eq!((get(&p, "sc"), get(&p, "if"), get(&p, "f.n"), get(&p, "p")), (Some("all"), Some("lagg0"), Some("1"), Some("53")));
+    }
+
+    #[test]
+    fn reported_lldp_sweep_is_read_back_whole() {
+        // From a parse feedback report: $(...) list with extra names left out, a
+        // differently named loop variable, timeout, and printed output saved as text.
+        let text = "mkdir /ifs/data/Isilon_Support/$(date +%Y-%m-%d); sleep 2; for INTERFACE in $(ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1); do timeout 120 tcpdump -nn -i $INTERFACE -v -s0 -c1 '(ether[12:2]=0x88cc or ether[20:2]=0x2000)' > /ifs/data/Isilon_Support/$(date +%Y-%m-%d)/${HOST}_${INTERFACE}.txt; done";
+        let p = parse(&cfg(), text, "powerscale").unwrap();
+        assert_eq!((get(&p, "im"), get(&p, "ix")), (Some("all"), Some("laggport|lo0|ISIINTERNAL|vlan|lagg")));
+        assert_eq!((get(&p, "w"), get(&p, "to"), get(&p, "lg"), get(&p, "bg")), (Some("0"), Some("1"), Some("0"), Some("0")));
+        assert_eq!((get(&p, "tm"), get(&p, "dd"), get(&p, "sd")), (Some("120"), Some("1"), None));
+        assert_eq!((get(&p, "f.nn"), get(&p, "f.v"), get(&p, "f.s"), get(&p, "f.c")), (Some("1"), Some("1"), Some("0"), Some("1")));
+        // The only thing left out is the pause, and it is said.
+        assert_eq!(p.notes, ["\"sleep 2\" before the capture is not something the builder writes and was left out."]);
+        let out = build(&cfg(), &p.pairs);
+        assert_eq!(
+            out.command,
+            "mkdir -p /ifs/data/Isilon_Support/$(date +%F); for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1`; do \
+             timeout 120 tcpdump -i ${iface} -s 0 -c 1 -nn -v \"(ether[12:2]=0x88cc or ether[20:2]=0x2000)\" \
+             > /ifs/data/Isilon_Support/$(date +%F)/$(uname -n)_${iface}.txt; done"
+        );
+        // And the builder's own version of it parses back to itself with nothing to say.
+        let again = parse(&cfg(), &out.command, "powerscale").unwrap();
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+        assert_eq!(build(&cfg(), &again.pairs).command, out.command);
+    }
+
+    #[test]
+    fn text_output_and_time_limit_in_other_shapes() {
+        // Backgrounded, inside a cluster wrapper, with sudo around timeout.
+        for q in [
+            "v=1&sc=all&if=lagg0&w=0&to=1&tm=60&dd=1&bg=1&f.c=1&f.n=1&p=53",
+            "v=1&t=linux&if=eth0&w=0&to=1&tm=30&dd=1&bg=0&f.c=5",
+            "v=1&t=linux&if=eth0&w=1&tm=600&dd=1&lg=1&bg=0&f.C=500&f.W=5",
+            "v=1&if=lagg0&w=0&tm=45&f.c=1",
+        ] {
+            let original = build(&cfg(), &parse_query(q));
+            assert!(!original.command.is_empty(), "{q}: {:?}", original.issues);
+            let parsed = parse(&cfg(), &original.command, "").unwrap();
+            assert!(parsed.notes.is_empty(), "{q}: {:?}", parsed.notes);
+            assert_eq!(build(&cfg(), &parsed.pairs).command, original.command, "{q}");
+        }
+        let p = parse(&cfg(), "timeout 2m sudo tcpdump -i eth0 -c1 > /dev/null", "linux").unwrap();
+        assert_eq!((get(&p, "tm"), get(&p, "to")), (None, None));
+        assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+        // With -w, a redirect is still the log, not text output.
+        let p = parse(&cfg(), "tcpdump -i lagg0 -C 500 -W 5 -w /ifs/data/Isilon_Support/$(date +%F)/x.pcap >> /ifs/data/Isilon_Support/x.log 2>&1 &", "powerscale").unwrap();
+        assert_eq!((get(&p, "w"), get(&p, "lg"), get(&p, "to")), (Some("1"), Some("1"), None));
+        // An unrecognisable interface list now points at the field, not the config file.
+        let p = parse(&cfg(), "for i in `ifconfig -l`; do tcpdump -i $i -c1; done", "powerscale").unwrap();
+        assert!(p.notes[0].contains("Leave out interfaces") && !p.notes[0].contains("all_interfaces"), "{:?}", p.notes);
     }
 
     #[test]
