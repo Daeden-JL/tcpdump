@@ -64,6 +64,7 @@
       <h4 id="parse-why" hidden>Why</h4>
     </section>
     <ul id="parse-notes" hidden></ul>
+    <button type="button" id="parse-feedback" hidden>Report a parsing problem…</button>
     <ul id="issues"></ul>
     <button type="button" id="fix" hidden>Fix problems…</button>
     <div id="stop" hidden>
@@ -119,6 +120,23 @@
   <p id="version" class="app-version"></p>
   <p id="links" class="links" hidden></p>
 </footer>
+<dialog id="feedback-dialog" aria-labelledby="feedback-title">
+  <h2 id="feedback-title">Report a parsing problem</h2>
+  <p id="feedback-where" class="note"></p>
+  <label class="field" for="feedback-expected">
+    <span>What did you expect Parse to do?</span>
+    <textarea id="feedback-expected" rows="3" placeholder="For example: it should have kept -n"></textarea>
+  </label>
+  <label class="field" for="feedback-report">
+    <span>What will be sent. Edit it to remove anything private, such as customer names or addresses.</span>
+    <textarea id="feedback-report" rows="10" spellcheck="false"></textarea>
+  </label>
+  <p id="feedback-status" class="note" role="status" hidden></p>
+  <div class="actions">
+    <button type="button" id="feedback-send" class="primary">Send report</button>
+    <button type="button" id="feedback-cancel">Cancel</button>
+  </div>
+</dialog>
 <dialog id="fix-dialog" aria-labelledby="fix-title">
   <h2 id="fix-title">Apply these fixes?</h2>
   <p id="fix-intro" class="note"></p>

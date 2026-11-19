@@ -38,3 +38,6 @@ go.work.sum
 
 # Rust build output
 /target
+
+# Parse feedback saved by the server
+parse-feedback.jsonl

@@ -33,6 +33,8 @@ async function getJSON(url) {
 }
 
 const target = () => config.targets.find((t) => t.id === state.target) || config.targets[0];
+// Whether "all interfaces" on this system has an editable list of names to leave out.
+const hasExclude = (t) => !t.any_interface && !!t.all_interfaces && t.all_interfaces.includes("{exclude}");
 const flagKey = (f) => f.name.replace(/^-+/, "");
 const visibleFlags = () => config.flags.filter((f) => !f.targets.length || f.targets.includes(state.target));
 // Normalise a typed list to comma-separated, keeping <a placeholder> whole.
@@ -47,6 +49,7 @@ function serialise(skip = []) {
     if (s.scope === "nodes") p.push(["n", list(s.nodes)]);
   }
   p.push(["im", s.iface_mode]);
+  if (s.iface_mode === "all" && hasExclude(target()) && s.iface_exclude !== target().all_interfaces_exclude) p.push(["ix", s.iface_exclude.trim()]);
   if (s.iface_mode === "named") p.push(["if", list(s.ifaces)]);
   p.push(["w", s.write ? "1" : "0"]);
   if (s.subdir.trim()) p.push(["sd", s.subdir.trim()]);
@@ -454,7 +457,14 @@ function renderForm() {
     t.cluster && radios("scope", "scope", [["node", "This node"], ["all", "All nodes"], ["nodes", "Selected nodes"]]),
     t.cluster && s.scope === "nodes" && textField("nodes", "Node numbers", "nodes", t.cluster.nodes_hint, "<nodes>"),
     radios("iface_mode", "iface_mode", [["named", "Named interface(s)"], ...(canAll ? [["all", t.all_interfaces_label]] : [])]),
-    s.iface_mode === "named" && textField("ifaces", "Interface(s), comma separated", "ifaces", t.interface_hint, "<interface>"));
+    s.iface_mode === "named" && textField("ifaces", "Interface(s), comma separated", "ifaces", t.interface_hint, "<interface>"),
+    s.iface_mode === "all" && hasExclude(t) && [
+      textField("iface_exclude", "Leave out interfaces whose name line contains any of these (separate with |)", "iface_exclude", t.all_interfaces_exclude),
+      s.iface_exclude !== t.all_interfaces_exclude && el("button", {
+        type: "button", class: "chip leave-open", text: `Reset to ${t.all_interfaces_exclude}`,
+        onclick: () => { s.iface_exclude = t.all_interfaces_exclude; changed(true); },
+      }),
+    ]);
 
   const dirPreview = [t.output_dir, s.subdir.trim().replace(/^\/+|\/+$/g, ""), s.dated ? t.date_subdir : ""].filter(Boolean).join("/");
   const output = section("output", "Output",
@@ -524,7 +534,7 @@ function renderForm() {
 
 // ---- problems: flag the fields, offer a fix ---------------------------------
 
-const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name"];
+const FIELD_IDS = ["ifaces", "nodes", "subdir", "hosts", "nets", "ports", "proto", "raw", "est_nodes", "est_ifaces", "link_speed", "free_space", "at_start_value", "at_stop_value", "cron_time", "cron_days", "cron_hours", "cron_expr", "cron_name", "iface_exclude"];
 let lastIssues = [];
 let pendingFix = null;
 
@@ -658,8 +668,80 @@ function renderDiff(box, words, changeClass) {
   box.replaceChildren(...nodes);
 }
 
+// ---- parse feedback ---------------------------------------------------------
+
+let lastParse = null; // what the last Parse was given and what it produced
+
+// Offer the feedback button after a Parse (pass null to withdraw it).
+function setFeedback(info) {
+  lastParse = info;
+  $("#parse-feedback").hidden = !info || config.feedback.mode === "off";
+}
+
+function feedbackReport() {
+  const p = lastParse;
+  const notes = p.notes.length ? p.notes.map((n) => `- ${n}`).join("\n") : "(none)";
+  return [
+    "Entered:", p.before.trim(), "",
+    "Parse produced:", p.after || "(no command)", "",
+    "Notes shown:", notes, "",
+    `System: ${target().name}`,
+    `Settings link: ${shareLink()}`,
+    `Version: ${config.app_version || "unknown"}`,
+  ].join("\n");
+}
+
+function openFeedback() {
+  const mode = config.feedback.mode;
+  $("#feedback-where").textContent = {
+    file: "The report is saved privately on this site's server for the people who maintain it.",
+    github: "This opens a new issue on GitHub for you to review and submit. Issues are public, and you need a GitHub account.",
+    email: `This opens your mail program with a message to ${config.feedback.email}.`,
+  }[mode] || "";
+  $("#feedback-send").textContent = { file: "Send report", github: "Open GitHub issue", email: "Open email" }[mode] || "Send";
+  $("#feedback-send").disabled = false;
+  $("#feedback-expected").value = "";
+  $("#feedback-report").value = feedbackReport();
+  $("#feedback-status").hidden = true;
+  $("#feedback-dialog").showModal();
+  $("#feedback-expected").focus();
+}
+
+async function sendFeedback() {
+  const expected = $("#feedback-expected").value.trim();
+  const report = $("#feedback-report").value.trim();
+  const status = (text) => { $("#feedback-status").hidden = false; $("#feedback-status").textContent = text; };
+  const title = `Parse: ${(report.split("\n")[1] || "problem").slice(0, 70)}`;
+  // Links can only carry so much text, so long reports are cut for GitHub and email.
+  const body = `What I expected:\n${expected || "(not given)"}\n\n${report}`.slice(0, 5000);
+  const mode = config.feedback.mode;
+  if (mode === "github") {
+    const repo = config.feedback.github_repo.replace(/\/+$/, "");
+    window.open(`${repo}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`, "_blank", "noopener");
+    $("#feedback-dialog").close();
+  } else if (mode === "email") {
+    location.href = `mailto:${config.feedback.email}?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+    $("#feedback-dialog").close();
+  } else {
+    $("#feedback-send").disabled = true;
+    try {
+      const res = await fetch("api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected, report }) });
+      const answer = await res.json().catch(() => ({}));
+      status(answer.message || (res.ok ? "Thank you. Your report was saved." : "The report could not be saved."));
+      if (res.ok) {
+        $("#feedback-cancel").textContent = "Close";
+        return;
+      }
+    } catch {
+      status("The report could not be sent. Check your connection and try again.");
+    }
+    $("#feedback-send").disabled = false;
+  }
+}
+
 // Show what Parse did to the text, or hide the view (no arguments).
 function showDiff(before, after) {
+  if (before == null) setFeedback(null);
   const diff = before != null && after ? diffWords(before.trim(), after) : null;
   $("#parse-diff").hidden = !diff || !diff.changed;
   if (!diff || !diff.changed) return;
@@ -694,8 +776,10 @@ async function parseCommand() {
   const result = await res.json();
   if (seq !== buildSeq) return;
   if (!result.found) {
+    const notes = ["No tcpdump command was found in that text, so nothing was changed."];
     showDiff();
-    showNotes(["No tcpdump command was found in that text, so nothing was changed."]);
+    showNotes(notes);
+    setFeedback({ before: text, after: "", notes });
     return;
   }
   flagValues = {};
@@ -705,6 +789,8 @@ async function parseCommand() {
   showOutput(result.output, !result.output.command);
   showDiff(text, result.output.command);
   showNotes(result.notes);
+  const problems = result.output.issues.filter((i) => i.level === "error").map((i) => i.message);
+  setFeedback({ before: text, after: result.output.command, notes: [...result.notes, ...problems] });
   history.replaceState(null, "", `?${serialise()}`);
 }
 
@@ -815,7 +901,10 @@ async function main() {
       changed(false);
     });
   }
-  $("#parse-diff-close").addEventListener("click", () => showDiff());
+  $("#parse-diff-close").addEventListener("click", () => { $("#parse-diff").hidden = true; });
+  $("#parse-feedback").addEventListener("click", openFeedback);
+  $("#feedback-send").addEventListener("click", () => sendFeedback().catch(console.error));
+  $("#feedback-cancel").addEventListener("click", () => { $("#feedback-dialog").close(); $("#feedback-cancel").textContent = "Cancel"; });
   $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
   $("#fix-apply").addEventListener("click", applyFix);
   $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());

@@ -525,6 +525,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
     // Interface: a name, the catch-all pseudo-interface, or a loop variable.
     let can_all = target.all_interfaces.is_some() || target.any_interface.is_some();
     let mut names: Vec<String> = Vec::new();
+    let mut iface_exclude: Option<String> = None;
     let mut all = false;
     match iface {
         None => notes.push(format!("No -i option found; the interface was set to {}.", target.default_interface)),
@@ -537,14 +538,21 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
                     let list = rest[..end].trim();
                     if list.starts_with('`') || list.starts_with("$(") {
                         all = true;
-                        // The builder always writes the configured expression, so say
-                        // so when the one in the text is different.
+                        // The builder writes the configured list. Read back the names it
+                        // leaves out when only those differ; otherwise say the list was replaced.
                         let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
                         if let Some(configured) = target.all_interfaces.as_ref().filter(|_| target.any_interface.is_none()) {
-                            if squash(list) != squash(configured) {
-                                notes.push(format!(
-                                    "The command lists interfaces with {list} but the builder always uses its configured list, {configured}. Change all_interfaces in the config to use a different one."
-                                ));
+                            let typed = squash(list);
+                            let exclude = configured.split_once("{exclude}").and_then(|(before, after)| {
+                                typed.strip_prefix(squash(before).as_str())?.strip_suffix(squash(after).as_str()).map(str::to_string)
+                            });
+                            match exclude {
+                                Some(pattern) => iface_exclude = Some(pattern),
+                                None if typed != squash(configured) => notes.push(format!(
+                                    "The command lists interfaces with {list} but the builder always uses its configured list, {}. Change all_interfaces in the config to use a different one.",
+                                    configured.replace("{exclude}", &target.all_interfaces_exclude)
+                                )),
+                                None => {}
                             }
                         }
                     } else {
@@ -573,6 +581,9 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         ok
     });
     put("im", if all { "all" } else { "named" });
+    if let Some(pattern) = iface_exclude.filter(|_| all) {
+        put("ix", &pattern);
+    }
     if !all && !names.is_empty() {
         put("if", &names.join(","));
     }
@@ -731,6 +742,12 @@ mod tests {
         assert!(p.notes[0].contains("grep -B2 ether") && p.notes[0].contains("grep -B3 ether"));
         let rebuilt = build(&cfg(), &p.pairs).command;
         assert!(rebuilt.contains(r#"for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v "laggport|lo0|ISIINTERNAL" | cut -d: -f1`; do"#), "{rebuilt}");
+        // A list that differs only in the names it leaves out is kept, with no note.
+        let other = rebuilt.replace("laggport|lo0|ISIINTERNAL", "lo0|vlan");
+        let p2 = parse(&cfg(), &other, "").unwrap();
+        assert!(p2.notes.is_empty(), "{:?}", p2.notes);
+        assert_eq!(get(&p2, "ix"), Some("lo0|vlan"));
+        assert_eq!(build(&cfg(), &p2.pairs).command, other);
         // The configured list, with different spacing, parses back with no note.
         let same = rebuilt.replace("| grep flags |", "|  grep flags  |");
         assert!(parse(&cfg(), &same, "").unwrap().notes.is_empty());

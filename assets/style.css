@@ -287,4 +287,17 @@ pre .diff-del { color: #ff9a9a; background: rgb(255 80 80 / 0.16); }
 pre .diff-add { color: #7ff0bf; background: rgb(80 255 170 / 0.14); }
 pre .diff-move { opacity: 0.8; }
 pre del, pre ins { border-radius: 3px; padding: 0 2px; }
+#parse-feedback { margin: 0 0 12px; }
+dialog textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: 0.85rem/1.5 var(--mono);
+  resize: vertical;
+}
+#feedback-dialog { width: min(640px, calc(100vw - 32px)); }
+#feedback-status { font-weight: 650; color: var(--ink); }
 [hidden] { display: none !important; }

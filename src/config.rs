@@ -14,6 +14,8 @@ pub struct Config {
     pub theme: Theme,
     #[serde(default)]
     pub estimate: EstimateConfig,
+    #[serde(default)]
+    pub feedback: Feedback,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub flags: Vec<Flag>,
@@ -21,6 +23,48 @@ pub struct Config {
     pub filter: FilterConfig,
     #[serde(default)]
     pub examples: Vec<Example>,
+}
+
+/// Where a "report a parsing problem" goes.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Feedback {
+    #[serde(default)]
+    pub mode: FeedbackMode,
+    /// For `file`: where reports are appended, one JSON object per line.
+    /// A relative path is taken from the folder the config file is in.
+    #[serde(default = "d_feedback_file")]
+    pub file: String,
+    /// For `github`: the repository to open an issue on. Defaults to `site.repo.url`.
+    #[serde(default)]
+    pub github_repo: String,
+    /// For `email`: the address reports are sent to.
+    #[serde(default)]
+    pub email: String,
+}
+
+impl Default for Feedback {
+    fn default() -> Self {
+        Feedback { mode: FeedbackMode::default(), file: d_feedback_file(), github_repo: String::new(), email: String::new() }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeedbackMode {
+    /// Saved privately in a file on the server.
+    #[default]
+    File,
+    /// Opens a pre-filled issue on GitHub (public).
+    Github,
+    /// Opens the visitor's mail program.
+    Email,
+    /// No feedback button.
+    Off,
+}
+
+fn d_feedback_file() -> String {
+    "parse-feedback.jsonl".into()
 }
 
 /// Inputs for the capture size estimate.
@@ -260,6 +304,11 @@ pub struct Target {
     /// Shell expression listing every interface, used in a `for` loop.
     #[serde(default)]
     pub all_interfaces: Option<String>,
+    /// Default for `{exclude}` in `all_interfaces`: the interface names (an
+    /// egrep pattern, parts separated by `|`) that are left out. Editable on
+    /// the page.
+    #[serde(default)]
+    pub all_interfaces_exclude: String,
     /// Name of the "all interfaces" choice on the page and in the summary.
     #[serde(default = "d_all_label")]
     pub all_interfaces_label: String,
@@ -489,6 +538,26 @@ impl Config {
             }
         }
         self.theme.validate()?;
+        match self.feedback.mode {
+            FeedbackMode::File if self.feedback.file.trim().is_empty() => {
+                return Err("feedback.file must name a file while feedback.mode is \"file\"".into());
+            }
+            FeedbackMode::Github => {
+                let repo = if self.feedback.github_repo.is_empty() { &self.site.repo.url } else { &self.feedback.github_repo };
+                let plain = repo.chars().all(|c| c.is_ascii_alphanumeric() || "._~:/-".contains(c));
+                if !repo.starts_with("https://") || !plain {
+                    return Err("feedback.github_repo (or site.repo.url) must be an https:// repository address while feedback.mode is \"github\"".into());
+                }
+            }
+            FeedbackMode::Email => {
+                let e = &self.feedback.email;
+                let plain = e.chars().all(|c| c.is_ascii_alphanumeric() || "@._+-".contains(c));
+                if e.matches('@').count() != 1 || e.starts_with('@') || e.ends_with('@') || !plain {
+                    return Err("feedback.email must be an email address while feedback.mode is \"email\"".into());
+                }
+            }
+            _ => {}
+        }
         if !self.estimate.link_speeds_gbit.contains(&self.estimate.default_link_speed_gbit) {
             return Err("estimate.default_link_speed_gbit must be one of estimate.link_speeds_gbit".into());
         }
@@ -509,6 +578,15 @@ impl Config {
                 return Err(format!("flag {} repeats a role another flag already has", f.name));
             }
             roles.push(f.role);
+        }
+        for t in &self.targets {
+            let uses = t.all_interfaces.as_ref().is_some_and(|a| a.contains("{exclude}"));
+            if uses && !crate::builder::valid_exclude(&t.all_interfaces_exclude) {
+                return Err(format!(
+                    "target {}: all_interfaces uses {{exclude}}, so all_interfaces_exclude must list at least one name (letters, digits and _ . : - separated by |)",
+                    t.id
+                ));
+            }
         }
         let mut ids = HashSet::new();
         for t in &self.targets {
@@ -610,6 +688,33 @@ mod tests {
     fn theme_rejects_unknown_names_and_unsafe_values() {
         let head = "version = \"1\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
         for bad in ["[theme.light]\nbackground = \"#fff\"", "[theme.dark]\nbg = \"red;} body{display:none\"", "[theme]\nmode = \"neon\""] {
+            assert!(Config::parse(&format!("{head}{bad}\n")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn feedback_defaults_to_a_private_file_and_validates_the_other_modes() {
+        let head = "version = \"1\"\n[[targets]]\nid = \"x\"\nname = \"X\"\noutput_dir = \"/tmp\"\ndefault_interface = \"eth0\"\n";
+        let cfg = Config::parse(head).unwrap();
+        assert_eq!((cfg.feedback.mode, cfg.feedback.file.as_str()), (FeedbackMode::File, "parse-feedback.jsonl"));
+        assert_eq!(Config::parse(SHIPPED).unwrap().feedback.mode, FeedbackMode::File);
+        for ok in [
+            "[feedback]\nmode = \"off\"",
+            "[feedback]\nmode = \"email\"\nemail = \"captures@example.com\"",
+            "[feedback]\nmode = \"github\"\ngithub_repo = \"https://github.com/example/repo\"",
+            "[site.repo]\nenabled = true\nurl = \"https://github.com/example/repo\"\n[feedback]\nmode = \"github\"",
+        ] {
+            assert!(Config::parse(&format!("{head}{ok}\n")).is_ok(), "{ok}");
+        }
+        for bad in [
+            "[feedback]\nmode = \"github\"",
+            "[feedback]\nmode = \"github\"\ngithub_repo = \"javascript:alert(1)\"",
+            "[feedback]\nmode = \"github\"\ngithub_repo = \"https://github.com/a/b?x=<script>\"",
+            "[feedback]\nmode = \"email\"",
+            "[feedback]\nmode = \"email\"\nemail = \"a@b.c?cc=x@y.z\"",
+            "[feedback]\nmode = \"file\"\nfile = \"\"",
+            "[feedback]\nmode = \"carrier-pigeon\"",
+        ] {
             assert!(Config::parse(&format!("{head}{bad}\n")).is_err(), "{bad}");
         }
     }
