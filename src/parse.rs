@@ -11,6 +11,8 @@ use crate::config::{Cluster, Config, Flag, Target, ValueType};
 pub struct Parsed {
     pub pairs: Vec<(String, String)>,
     pub notes: Vec<String>,
+    /// The `-w` path as it was written in the text, if there was one.
+    pub out_path: Option<String>,
 }
 
 /// tcpdump options that consume the following word, used to skip the value
@@ -29,14 +31,24 @@ struct Scan {
 
 /// Split shell text into words up to the end of the first simple command.
 /// `$(...)` and backtick substitutions stay inside their word.
-fn scan(s: &str) -> Scan {
+///
+/// `wrapped` says the text sits inside a single-quoted wrapper such as
+/// `isi_for_array '...'`, where the next `'` ends the command. Otherwise a
+/// `'` opens a quoted word, as in `tcpdump -i ix1 '(port 53)'`.
+fn scan(s: &str, wrapped: bool) -> Scan {
     let mut tokens = Vec::new();
     let (mut cur, mut has, mut quoted) = (String::new(), false, false);
-    let (mut in_quotes, mut in_ticks, mut depth) = (false, false, 0usize);
+    let (mut in_quotes, mut in_single, mut in_ticks, mut depth) = (false, false, false, 0usize);
     let mut stop = s.len();
     let mut it = s.char_indices().peekable();
     while let Some((i, c)) = it.next() {
-        if in_ticks {
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            } else {
+                cur.push(c);
+            }
+        } else if in_ticks {
             cur.push(c);
             in_ticks = c != '`';
         } else if depth > 0 {
@@ -79,6 +91,7 @@ fn scan(s: &str) -> Scan {
                         }
                     }
                 }
+                '\'' if !wrapped => (in_single, quoted, has) = (true, true, true),
                 ';' | '&' | '>' | '<' | '|' | '\'' => {
                     stop = i;
                     break;
@@ -157,21 +170,46 @@ fn cluster_scope(text: &str, cluster: &Cluster) -> Option<(&'static str, String)
     Some(("all", String::new()))
 }
 
-/// Break `nnv` into the keys of single-dash Bool flags (`nn`, `v`).
-fn split_bools<'a>(mut rest: &str, flags: &[&'a Flag]) -> Option<Vec<&'a str>> {
+/// A run of short options written together, taken apart.
+struct ShortRun<'a> {
+    /// Keys of the Bool flags in it.
+    bools: Vec<&'a str>,
+    /// Options the builder has no setting for (`-X`).
+    unknown: Vec<String>,
+    /// The option that takes a value, if the run ends in one, with whatever
+    /// was attached to it (`-s0` gives `("-s", "0")`).
+    tail: Option<(String, String)>,
+}
+
+/// Split a run of short options written together, as tcpdump accepts them:
+/// `nnv` is `-nn -v`, `ni` is `-n -i` with the value in the next word, and
+/// `nvs0` is `-n -v -s 0`.
+fn split_cluster<'a>(mut rest: &str, flags: &[&'a Flag]) -> ShortRun<'a> {
     let mut keys: Vec<&str> = flags
         .iter()
         .filter(|f| f.value_type == ValueType::Bool && !f.name.starts_with("--"))
         .map(|f| f.key())
         .collect();
     keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
-    let mut out = Vec::new();
-    while !rest.is_empty() {
-        let key = keys.iter().find(|k| rest.starts_with(**k))?;
-        out.push(*key);
-        rest = &rest[key.len()..];
+    let mut out = ShortRun { bools: Vec::new(), unknown: Vec::new(), tail: None };
+    while let Some(first) = rest.chars().next() {
+        if let Some(key) = keys.iter().find(|k| rest.starts_with(**k)) {
+            out.bools.push(*key);
+            rest = &rest[key.len()..];
+            continue;
+        }
+        let name = format!("-{first}");
+        let after = &rest[first.len_utf8()..];
+        let known_value = name == "-i" || name == "-w" || flags.iter().any(|f| f.name == name && f.value_type != ValueType::Bool);
+        if known_value || TAKES_VALUE.contains(&name.as_str()) {
+            // Everything after a value-taking option is its value.
+            out.tail = Some((name, after.to_string()));
+            break;
+        }
+        out.unknown.push(name);
+        rest = after;
     }
-    Some(out)
+    out
 }
 
 #[derive(Default)]
@@ -400,7 +438,8 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
     let (text, schedule) = split_schedule(text, &mut notes);
     let text = text.replace("\\\n", " ").replace(['\n', '\r'], " ");
     let start = find_tcpdump(&text)?;
-    let Scan { tokens, stop } = scan(&text[start..]);
+    let wrapped = text[..start].matches('\'').count() % 2 == 1;
+    let Scan { tokens, stop } = scan(&text[start..], wrapped);
     let tail = &text[start + stop..];
 
     let mut pairs: Vec<(String, String)> = vec![("v".into(), "1".into()), ("t".into(), target.id.clone())];
@@ -445,26 +484,40 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
             iface = take_next(tok, &mut notes);
         } else if tok == "-w" {
             out_path = take_next(tok, &mut notes);
-        } else if let Some(v) = tok.strip_prefix("-i") {
-            iface = Some(v.to_string());
-        } else if let Some(v) = tok.strip_prefix("-w") {
-            out_path = Some(v.to_string());
-        } else if let Some(f) = flags.iter().find(|f| {
-            f.name.len() == 2 && f.value_type != ValueType::Bool && tok.starts_with(&f.name)
-        }) {
-            set_flags.push((f.key().into(), tok[2..].to_string()));
-        } else if let Some(keys) = tok.strip_prefix('-').and_then(|rest| split_bools(rest, &flags)) {
-            set_flags.extend(keys.into_iter().map(|k| (k.to_string(), "1".to_string())));
-        } else if cfg.flags.iter().any(|f| f.name == *tok) {
-            notes.push(format!("{tok} is not available for {} and was left out.", target.name));
-            if TAKES_VALUE.contains(&tok.as_str()) {
-                take_next(tok, &mut notes);
+        } else if let Some(run) = tok.strip_prefix('-').filter(|r| !r.starts_with('-')) {
+            // Short options, possibly run together: -nnv, -ni <iface>, -s0, -nvs0 ...
+            let cluster = split_cluster(run, &flags);
+            let left_out = |name: &str| {
+                let whole = if name == tok { String::new() } else { format!(" (in {tok})") };
+                if cfg.flags.iter().any(|f| f.name == name) {
+                    format!("{name}{whole} is not available for {} and was left out.", target.name)
+                } else {
+                    format!("{name}{whole} is not an option the builder knows and was left out.")
+                }
+            };
+            set_flags.extend(cluster.bools.into_iter().map(|k| (k.to_string(), "1".to_string())));
+            notes.extend(cluster.unknown.iter().map(|name| left_out(name)));
+            if let Some((name, attached)) = cluster.tail {
+                let known = flags.iter().find(|f| f.name == name);
+                if name != "-i" && name != "-w" && known.is_none() {
+                    // An option the builder lacks: skip its value too.
+                    notes.push(left_out(&name));
+                    if attached.is_empty() && next.is_some() {
+                        i += 1;
+                    }
+                } else {
+                    let value = if attached.is_empty() { take_next(&name, &mut notes) } else { Some(attached) };
+                    match (name.as_str(), value, known) {
+                        (_, None, _) => {}
+                        ("-i", v, _) => iface = v,
+                        ("-w", v, _) => out_path = v,
+                        (_, Some(v), Some(f)) => set_flags.push((f.key().into(), v)),
+                        _ => {}
+                    }
+                }
             }
         } else {
             notes.push(format!("{tok} is not an option the builder knows and was left out."));
-            if TAKES_VALUE.contains(&tok.as_str()) {
-                take_next(tok, &mut notes);
-            }
         }
     }
     let filter_words: Vec<String> = tokens[i..].iter().flat_map(|t| split_atoms(&t.0, false)).collect();
@@ -578,7 +631,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         }
     }
     pairs.extend(schedule);
-    Some(Parsed { pairs, notes })
+    Some(Parsed { pairs, notes, out_path })
 }
 
 #[cfg(test)]
@@ -692,6 +745,59 @@ mod tests {
         assert_eq!(p.notes.len(), 1);
         assert!(p.notes[0].contains("-X"));
         assert_eq!(build(&cfg(), &p.pairs).command, "sudo tcpdump -i any -c 5 -nn -v \"tcp[13] & 2 != 0\"");
+    }
+
+    #[test]
+    fn short_options_run_together_are_all_kept() {
+        // The LLDP/CDP command as it is usually typed: -n joined to -i, -s and
+        // -c with attached values, and a single-quoted filter.
+        let p = parse(&cfg(), "tcpdump -ni ix1 -v -s0 -c1 '(ether[12:2]=0x88cc or ether[20:2]=0x2000)'", "powerscale").unwrap();
+        assert!(p.notes.is_empty(), "{:?}", p.notes);
+        assert_eq!((get(&p, "if"), get(&p, "f.n"), get(&p, "f.v")), (Some("ix1"), Some("1"), Some("1")));
+        assert_eq!((get(&p, "f.s"), get(&p, "f.c"), get(&p, "w")), (Some("0"), Some("1"), Some("0")));
+        assert_eq!(get(&p, "q"), Some("(ether[12:2]=0x88cc or ether[20:2]=0x2000)"));
+        assert_eq!(build(&cfg(), &p.pairs).command, "tcpdump -i ix1 -s 0 -c 1 -n -v \"(ether[12:2]=0x88cc or ether[20:2]=0x2000)\"");
+
+        // With a placeholder, which is how the template is shared.
+        let p = parse(&cfg(), "tcpdump -ni <interface> -c 5 port 53", "powerscale").unwrap();
+        assert!(p.notes.is_empty(), "{:?}", p.notes);
+        assert_eq!((get(&p, "if"), get(&p, "f.n"), get(&p, "f.c"), get(&p, "p")), (Some("<interface>"), Some("1"), Some("5"), Some("53")));
+        assert!(build(&cfg(), &p.pairs).command.starts_with("tcpdump -i <interface> -c 5 -n "));
+
+        // Other ways of running them together.
+        for (text, expect) in [
+            ("tcpdump -nei eth0", vec![("f.n", "1"), ("f.e", "1"), ("if", "eth0")]),
+            ("tcpdump -nnvi eth0", vec![("f.nn", "1"), ("f.v", "1"), ("if", "eth0")]),
+            ("tcpdump -ieth0 -nvs0", vec![("if", "eth0"), ("f.n", "1"), ("f.v", "1"), ("f.s", "0")]),
+            ("tcpdump -nc5 -i eth0", vec![("f.n", "1"), ("f.c", "5"), ("if", "eth0")]),
+            ("tcpdump -pni eth0 -w~/tcpdump_capture/x.pcap", vec![("f.p", "1"), ("f.n", "1"), ("if", "eth0"), ("w", "1")]),
+        ] {
+            let p = parse(&cfg(), text, "linux").unwrap();
+            assert!(p.notes.is_empty(), "{text}: {:?}", p.notes);
+            for (k, v) in expect {
+                assert_eq!(get(&p, k), Some(v), "{text}: {k}");
+            }
+        }
+        // -n and -nn are different options and both survive.
+        let p = parse(&cfg(), "tcpdump -n -i eth0", "linux").unwrap();
+        assert_eq!((get(&p, "f.n"), get(&p, "f.nn")), (Some("1"), None));
+        // A letter the builder does not have is reported; the rest of the run is still read.
+        let p = parse(&cfg(), "tcpdump -nXi eth0 port 53", "linux").unwrap();
+        assert_eq!(p.notes, ["-X (in -nXi) is not an option the builder knows and was left out."]);
+        assert_eq!((get(&p, "f.n"), get(&p, "if"), get(&p, "p")), (Some("1"), Some("eth0"), Some("53")));
+        // An unknown option that takes a value has its value skipped, attached or not.
+        for text in ["tcpdump -n -y EN10MB -i eth0 port 53", "tcpdump -nyEN10MB -i eth0 port 53"] {
+            let p = parse(&cfg(), text, "linux").unwrap();
+            assert_eq!(p.notes.len(), 1, "{text}: {:?}", p.notes);
+            assert_eq!((get(&p, "f.n"), get(&p, "if"), get(&p, "p"), get(&p, "q")), (Some("1"), Some("eth0"), Some("53"), None), "{text}");
+        }
+        // A flag that exists but not for this system says so.
+        let p = parse(&cfg(), "tcpdump -n -Z root -i lagg0", "powerscale").unwrap();
+        assert_eq!(p.notes, ["-Z is not available for PowerScale (OneFS) and was left out."]);
+        assert_eq!(get(&p, "if"), Some("lagg0"));
+        // Inside an isi_for_array wrapper the closing quote still ends the command.
+        let p = parse(&cfg(), "isi_for_array -X 'tcpdump -ni lagg0 -c1 port 53' &", "").unwrap();
+        assert_eq!((get(&p, "sc"), get(&p, "if"), get(&p, "f.n"), get(&p, "p")), (Some("all"), Some("lagg0"), Some("1"), Some("53")));
     }
 
     #[test]

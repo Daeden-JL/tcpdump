@@ -1851,7 +1851,7 @@ mod tests {
             "Only traffic matching \"ether[12:2]=0x88cc or ether[20:2]=0x2000\".",
             "Prints packets to the screen; nothing is saved.",
             "Stops after 1 packet.",
-            "Also: no name lookups (-nn) and verbose (-v).",
+            "Also: no name or port lookups (-nn) and verbose (-v).",
         ]);
 
         let o = run("v=1&sc=all&if=<interface>&w=1&f.C=500&as=cron&ck=weekdays&ct=22:15&cd=1,5&ae=delay&aev=90&aeu=minutes");

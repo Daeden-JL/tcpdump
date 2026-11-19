@@ -587,6 +587,7 @@ function applyFix() {
   renderForm();
   showOutput(out);
   showNotes([]);
+  showDiff();
   history.replaceState(null, "", `?${serialise()}`);
 }
 
@@ -612,6 +613,58 @@ function markEdited() {
 function showNotes(notes) {
   $("#parse-notes").hidden = !notes.length;
   $("#parse-notes").replaceChildren(...notes.map((n) => el("li", { text: n })));
+  $("#parse-why").hidden = !notes.length;
+}
+
+// Compare two commands word by word. Returns, for each side, its words
+// tagged "same" (in both, in order), "move" (in both, but elsewhere) or
+// "change" (only on that side). Line breaks are kept as words of their own.
+function diffWords(before, after) {
+  const words = (text) => text.match(/\n|[^\s]+/g) || [];
+  const a = words(before);
+  const b = words(after);
+  // Longest common subsequence: the words that stayed put.
+  const lcs = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      lcs[i][j] = a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const left = a.map((text) => ({ text, kind: "change" }));
+  const right = b.map((text) => ({ text, kind: "change" }));
+  for (let i = 0, j = 0; i < a.length && j < b.length;) {
+    if (a[i] === b[j]) { left[i++].kind = "same"; right[j++].kind = "same"; }
+    else if (lcs[i + 1][j] >= lcs[i][j + 1]) i++;
+    else j++;
+  }
+  // Of what is left, pair up identical words: those only changed position.
+  for (const l of left) {
+    if (l.kind !== "change") continue;
+    const r = right.find((x) => x.kind === "change" && x.text === l.text);
+    if (r) { l.kind = "move"; r.kind = "move"; }
+  }
+  return { left, right, changed: [...left, ...right].some((w) => w.kind !== "same") };
+}
+
+// Fill one side of the before/after view, marking what differs.
+function renderDiff(box, words, changeClass) {
+  const nodes = [];
+  words.forEach((w, i) => {
+    if (w.text === "\n") { nodes.push("\n"); return; }
+    if (i > 0 && words[i - 1].text !== "\n") nodes.push(" ");
+    if (w.kind === "same") nodes.push(w.text);
+    else nodes.push(el(w.kind === "move" ? "span" : changeClass === "diff-del" ? "del" : "ins", { class: w.kind === "move" ? "diff-move" : changeClass, text: w.text }));
+  });
+  box.replaceChildren(...nodes);
+}
+
+// Show what Parse did to the text, or hide the view (no arguments).
+function showDiff(before, after) {
+  const diff = before != null && after ? diffWords(before.trim(), after) : null;
+  $("#parse-diff").hidden = !diff || !diff.changed;
+  if (!diff || !diff.changed) return;
+  renderDiff($("#diff-before"), diff.left, "diff-del");
+  renderDiff($("#diff-after"), diff.right, "diff-add");
 }
 
 function showOutput(out, keepText) {
@@ -641,6 +694,7 @@ async function parseCommand() {
   const result = await res.json();
   if (seq !== buildSeq) return;
   if (!result.found) {
+    showDiff();
     showNotes(["No tcpdump command was found in that text, so nothing was changed."]);
     return;
   }
@@ -649,6 +703,7 @@ async function parseCommand() {
   renderForm();
   // If the parsed settings do not build, keep the text so it can be corrected.
   showOutput(result.output, !result.output.command);
+  showDiff(text, result.output.command);
   showNotes(result.notes);
   history.replaceState(null, "", `?${serialise()}`);
 }
@@ -662,6 +717,7 @@ async function refresh() {
     if (seq === buildSeq) {
       showOutput(out);
       showNotes([]);
+  showDiff();
     }
   } catch (e) {
     console.error(e);
@@ -677,6 +733,7 @@ async function load(query, updateUrl) {
   renderForm();
   showOutput(out);
   showNotes([]);
+  showDiff();
   if (updateUrl) history.replaceState(null, "", `?${serialise()}`);
 }
 
@@ -748,6 +805,7 @@ async function main() {
     $("#command").value = generated;
     markEdited();
     showNotes([]);
+  showDiff();
   });
   window.addEventListener("resize", fitCommand);
   for (const id of ESTIMATE_INPUTS) {
@@ -757,6 +815,7 @@ async function main() {
       changed(false);
     });
   }
+  $("#parse-diff-close").addEventListener("click", () => showDiff());
   $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
   $("#fix-apply").addEventListener("click", applyFix);
   $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());
