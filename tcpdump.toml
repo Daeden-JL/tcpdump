@@ -71,6 +71,24 @@ error = "#ff8f8f"
 warn = "#f0c060"
 
 # ---------------------------------------------------------------------------
+# Parse feedback. After a Parse, a "Report a parsing problem" button lets
+# people say when a command was read wrongly. `mode` chooses where it goes:
+#
+#   file    saved privately on this server, one JSON object per line, in
+#           `file` (a relative path is taken from this file's folder)
+#   github  opens a pre-filled issue on `github_repo` (default: site.repo.url);
+#           public, and needs a GitHub account
+#   email   opens the visitor's mail program, addressed to `email`
+#   off     no button
+# ---------------------------------------------------------------------------
+
+[feedback]
+mode = "file"
+file = "parse-feedback.jsonl"
+github_repo = ""
+email = ""
+
+# ---------------------------------------------------------------------------
 # Capture size estimate. Size-rotated captures have an exact limit. Timed
 # captures depend on traffic, so the estimate assumes a link of the chosen
 # speed completely full in both directions.
@@ -145,7 +163,10 @@ interface_hint = "e.g. lagg0, or several: bxe0, bxe1"
 all_interfaces_label = "All interfaces (external)"
 # Lists the external interfaces: every interface with an "ether" line, minus
 # lagg member ports, loopback and the internal (back-end) interfaces.
-all_interfaces = '`ifconfig | grep -B3 ether | grep flags | egrep -v "laggport|lo0|ISIINTERNAL" | cut -d: -f1`'
+# {exclude} is filled from the "Leave out interfaces" field on the page,
+# which starts as all_interfaces_exclude.
+all_interfaces = '`ifconfig | grep -B3 ether | grep flags | egrep -v "{exclude}" | cut -d: -f1`'
+all_interfaces_exclude = "laggport|lo0|ISIINTERNAL"
 
 [targets.cluster]
 all_nodes = "isi_for_array -X '{command}'"

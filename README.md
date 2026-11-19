@@ -114,6 +114,25 @@ underlined where something is new, and dotted where a word only moved. The
 notes underneath say why anything was left out or replaced. Options written
 together (`-ni eth0`, `-nvs0`) are understood and kept.
 
+### Reporting a parsing problem
+
+After a Parse, a **Report a parsing problem** button opens a form with the
+text that was entered, what Parse produced and the notes it showed, plus a
+box for what was expected. Everything can be edited before it is sent, so
+private details can be removed. `[feedback]` in the TOML chooses where it
+goes:
+
+| `mode` | What happens |
+| --- | --- |
+| `file` (default) | Saved privately on the server, one JSON object per line, in `feedback.file` next to the config. |
+| `github` | Opens a pre-filled issue on `feedback.github_repo` (default: the repo link). Public; needs a GitHub account. |
+| `email` | Opens the visitor's mail program, addressed to `feedback.email`. |
+| `off` | No button. |
+
+In `file` mode the server accepts at most 20 reports a minute, 16 KB per
+report, and stops when the file reaches 5 MB. Read the file with any text
+tool, for example `jq . parse-feedback.jsonl`.
+
 ## Invalid values
 
 A setting with a problem is outlined in the form with the message beside it,
@@ -201,6 +220,15 @@ before running** panel at the top with one box per placeholder. What they type
 is checked like any other value and put into the command; the settings keep
 the placeholder, so the same link can be handed on again.
 
+## Interfaces left out of "All interfaces"
+
+On PowerScale, "All interfaces (external)" loops over the output of
+`all_interfaces` in the TOML, which contains `egrep -v "{exclude}"`. The
+names to leave out start as `all_interfaces_exclude` and can be changed on the
+page in the **Leave out interfaces** field; the value is kept in the share
+link. Parse reads the list back from a pasted command, so a command that
+differs only in those names is kept as written.
+
 ## Capture size estimate
 
 The result panel shows how much disk the capture can use:
@@ -238,6 +266,7 @@ trusted as written.
 | `GET /api/build?<query>` | JSON: `command`, `stop_command`, `issues`, resolved `state` |
 | `POST /api/parse?t=<target>` | Body is command text. JSON: `found`, `notes`, and `output` in the same form as `/api/build` |
 | `GET /api/fix?<query>` | JSON: `changes` (what would be repaired) and `output` for the repaired settings |
+| `POST /api/feedback` | Saves a parse report (JSON `expected`, `report`) when `feedback.mode` is `file` |
 | `GET /theme.css` | The colours from `[theme]` as CSS variables |
 | `GET /api/config` | The current config with example commands filled in |
 | `GET /api/events` | Server-sent event on each config reload |

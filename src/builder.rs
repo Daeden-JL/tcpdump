@@ -53,6 +53,8 @@ pub struct State {
     pub est_ifaces: String,
     pub link_speed: String,
     pub free_space: String,
+    /// Interface names left out of "all interfaces" (an egrep pattern).
+    pub iface_exclude: String,
     /// Recurring capture (start mode "cron"): kind is "daily", "weekdays",
     /// "hours" or "custom".
     pub cron_kind: String,
@@ -333,6 +335,16 @@ fn valid_port(p: &str) -> bool {
         Some((a, b)) => ok(a) && ok(b),
         None => ok(p),
     }
+}
+
+/// An egrep pattern for interface names to leave out: plain names joined by `|`.
+pub fn valid_exclude(s: &str) -> bool {
+    !s.is_empty() && s.split('|').all(|part| all_chars(part, "_.:-"))
+}
+
+/// Whether the "all interfaces" list of this target has an editable exclusion.
+fn has_exclude(target: &Target) -> bool {
+    target.any_interface.is_none() && target.all_interfaces.as_ref().is_some_and(|a| a.contains("{exclude}"))
 }
 
 fn valid_iface(s: &str) -> bool {
@@ -670,6 +682,10 @@ pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
         st.scope = "node".into();
         st.nodes.clear();
     }
+    if st.iface_mode == "all" && has_exclude(target) && !valid_exclude(&st.iface_exclude) {
+        changes.push(format!("Interfaces to leave out ({}) reset to {}.", shown(&st.iface_exclude), target.all_interfaces_exclude));
+        st.iface_exclude = target.all_interfaces_exclude.clone();
+    }
     if !st.subdir.is_empty() && !valid_subdir(&st.subdir) {
         changes.push(format!("Subfolder {:?} removed.", st.subdir));
         st.subdir.clear();
@@ -818,6 +834,10 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
             given => given.to_string(),
         },
         free_space: get("fs").trim().to_string(),
+        iface_exclude: match q.get("ix") {
+            Some(given) => given.trim().to_string(),
+            None => target.all_interfaces_exclude.clone(),
+        },
         cron_kind: match get("ck") {
             k @ ("weekdays" | "hours" | "custom") => k.to_string(),
             _ => "daily".to_string(),
@@ -1157,6 +1177,10 @@ fn summarize(cfg: &Config, st: &State, target: &Target, dir: &str, background: b
         _ => String::new(),
     };
     lines.push(format!("Captures on {ifaces}{nodes}."));
+    if st.iface_mode == "all" && has_exclude(target) {
+        let left_out: Vec<String> = st.iface_exclude.split('|').map(str::to_string).collect();
+        lines.push(format!("Interfaces whose name line contains {} are left out.", word_list(&left_out, "or")));
+    }
 
     // What traffic.
     let mut which = Vec::new();
@@ -1276,7 +1300,10 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
 
     // Interfaces: a literal name, or a shell loop over several.
     let loop_list: Option<String> = if st.iface_mode == "all" {
-        target.all_interfaces.clone().filter(|_| target.any_interface.is_none())
+        if has_exclude(target) && !valid_exclude(&st.iface_exclude) {
+            cx.error("iface_exclude", "List at least one interface name to leave out, separated by | (for example lo0|laggport). Use letters, digits and _ . : - only.");
+        }
+        target.all_interfaces.as_ref().filter(|_| target.any_interface.is_none()).map(|a| render(a, &[("exclude", &st.iface_exclude)]))
     } else {
         for i in &st.ifaces {
             if !valid_iface(i) {
@@ -1866,6 +1893,29 @@ mod tests {
         assert!(run("v=1&f.s=abc").summary.is_empty());
         // A filled-in placeholder is described by its value.
         assert_eq!(run("v=1&if=<interface>&w=0&ph.<interface>=ix0,ix1").summary[0], "Captures on ix0 and ix1 on this node.");
+    }
+
+    #[test]
+    fn interfaces_left_out_of_all_interfaces_can_be_changed() {
+        let list = |o: &Output| o.command.split("for iface in ").nth(1).and_then(|r| r.split("; do").next()).unwrap_or("").to_string();
+        let o = run("v=1&sc=all&im=all&w=1&f.C=500&f.W=5");
+        assert_eq!(list(&o), r#"`ifconfig | grep -B3 ether | grep flags | egrep -v "laggport|lo0|ISIINTERNAL" | cut -d: -f1`"#);
+        assert_eq!(o.state.iface_exclude, "laggport|lo0|ISIINTERNAL");
+        let o = run("v=1&sc=all&im=all&w=1&f.C=500&f.W=5&ix=lo0|vlan|mgmt-1");
+        assert!(errors(&o).is_empty(), "{:?}", o.issues);
+        assert_eq!(list(&o), r#"`ifconfig | grep -B3 ether | grep flags | egrep -v "lo0|vlan|mgmt-1" | cut -d: -f1`"#);
+        assert_eq!(o.summary[1], "Interfaces whose name line contains lo0, vlan or mgmt-1 are left out.");
+        // Empty would leave out everything; shell characters would break out of the quotes.
+        for bad in ["", "lo0|", "lo0\" ; reboot ; \"", "$(id)", "lo0`id`", "a b", "lo0'"] {
+            let q = format!("v=1&sc=all&im=all&w=1&f.C=500&f.W=5&ix={bad}");
+            let o = run(&q);
+            assert!(o.issues.iter().any(|i| i.level == "error" && i.field == "iface_exclude") && o.command.is_empty(), "{bad:?}");
+            let f = fix(&cfg(), &parse_query(&q));
+            assert!(errors(&f.output).is_empty() && f.output.state.iface_exclude == "laggport|lo0|ISIINTERNAL", "{bad:?}");
+        }
+        // It is not checked, or used, when interfaces are named or the system has "any".
+        assert!(errors(&run("v=1&if=lagg0&ix=")).is_empty());
+        assert_eq!(run("v=1&t=linux&im=all&w=0&ix=").command, "sudo tcpdump -i any");
     }
 
     #[test]

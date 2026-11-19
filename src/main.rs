@@ -3,18 +3,20 @@ mod config;
 mod parse;
 
 use axum::extract::{RawQuery, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use config::Config;
+use config::{Config, FeedbackMode};
 use notify::{RecursiveMode, Watcher};
 use serde_json::json;
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, RwLock};
-use std::time::Duration;
+use std::io::Write;
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::{Stream, StreamExt};
@@ -30,6 +32,8 @@ struct App {
     live: RwLock<Live>,
     /// Bumped on every reload attempt; pages listen for it over SSE.
     generation: watch::Sender<u64>,
+    /// Start of the current minute and how many feedback reports it has taken.
+    feedback_gate: Mutex<(Instant, u32)>,
 }
 
 impl App {
@@ -116,6 +120,11 @@ async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
         "flags": cfg.flags,
         "filter": cfg.filter,
         "estimate": cfg.estimate,
+        "feedback": {
+            "mode": cfg.feedback.mode,
+            "github_repo": if cfg.feedback.github_repo.is_empty() { &cfg.site.repo.url } else { &cfg.feedback.github_repo },
+            "email": cfg.feedback.email,
+        },
         "examples": examples,
     })))
 }
@@ -123,6 +132,88 @@ async fn api_config(State(app): State<Arc<App>>) -> impl IntoResponse {
 async fn api_build(State(app): State<Arc<App>>, RawQuery(query): RawQuery) -> impl IntoResponse {
     let pairs = builder::parse_query(query.as_deref().unwrap_or(""));
     no_cache(Json(builder::build(&app.config(), &pairs)))
+}
+
+/// Limits on feedback saved to the server's file.
+const FEEDBACK_MAX_BODY: usize = 16 * 1024;
+const FEEDBACK_MAX_FIELD: usize = 8000;
+const FEEDBACK_PER_MINUTE: u32 = 20;
+const FEEDBACK_MAX_FILE: u64 = 5 * 1024 * 1024;
+
+/// Seconds since 1970 as `2026-11-19T22:15:03Z`.
+fn utc_timestamp(secs: u64) -> String {
+    let (days, rest) = (secs / 86400, secs % 86400);
+    // Days to a civil date (proleptic Gregorian), after Howard Hinnant.
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (day, month) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
+}
+
+/// One line of the feedback file. Control characters are dropped and long
+/// text is cut, so a report cannot forge or bloat the file.
+fn feedback_line(expected: &str, report: &str, secs: u64) -> String {
+    let clean = |s: &str| -> String { s.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').take(FEEDBACK_MAX_FIELD).collect() };
+    json!({ "time": utc_timestamp(secs), "version": app_version(), "expected": clean(expected), "report": clean(report) }).to_string()
+}
+
+/// Save a parse feedback report to the server's private file.
+async fn api_feedback(State(app): State<Arc<App>>, headers: HeaderMap, body: String) -> (StatusCode, Json<serde_json::Value>) {
+    let reply = |code: StatusCode, message: &str| (code, Json(json!({ "ok": code == StatusCode::OK, "message": message })));
+    let cfg = app.config();
+    if cfg.feedback.mode != FeedbackMode::File {
+        return reply(StatusCode::NOT_FOUND, "Reports are not saved on this server.");
+    }
+    // Requiring JSON keeps other websites from posting here through a visitor's browser.
+    let is_json = headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("application/json"));
+    if !is_json {
+        return reply(StatusCode::UNSUPPORTED_MEDIA_TYPE, "The report must be sent as JSON.");
+    }
+    if body.len() > FEEDBACK_MAX_BODY {
+        return reply(StatusCode::PAYLOAD_TOO_LARGE, "The report is too long. Shorten it and try again.");
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return reply(StatusCode::BAD_REQUEST, "The report could not be read.");
+    };
+    let field = |name: &str| value.get(name).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let (expected, report) = (field("expected"), field("report"));
+    if expected.is_empty() && report.is_empty() {
+        return reply(StatusCode::BAD_REQUEST, "The report is empty.");
+    }
+    {
+        let mut gate = app.feedback_gate.lock().unwrap();
+        if gate.0.elapsed() >= Duration::from_secs(60) {
+            *gate = (Instant::now(), 0);
+        }
+        if gate.1 >= FEEDBACK_PER_MINUTE {
+            return reply(StatusCode::TOO_MANY_REQUESTS, "Too many reports just now. Please try again in a minute.");
+        }
+        gate.1 += 1;
+    }
+    let dir = app.path.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let path = dir.join(&cfg.feedback.file);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= FEEDBACK_MAX_FILE) {
+        eprintln!("feedback file {} is full; report not saved", path.display());
+        return reply(StatusCode::INSUFFICIENT_STORAGE, "The report could not be saved: the feedback file is full.");
+    }
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let saved = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "{}", feedback_line(&expected, &report, secs)));
+    match saved {
+        Ok(()) => reply(StatusCode::OK, "Thank you. Your report was saved."),
+        Err(e) => {
+            eprintln!("cannot write feedback to {}: {e}", path.display());
+            reply(StatusCode::INTERNAL_SERVER_ERROR, "The report could not be saved on the server.")
+        }
+    }
 }
 
 /// Repair invalid settings. Nothing is applied here: the page shows the
@@ -253,6 +344,7 @@ async fn main() {
         path,
         live: RwLock::new(Live { config: Arc::new(cfg), error: None }),
         generation: watch::channel(0).0,
+        feedback_gate: Mutex::new((Instant::now(), 0)),
     });
     if let Err(e) = watch_config(app.clone()) {
         eprintln!("warning: cannot watch the config file, live edits are off: {e}");
@@ -272,6 +364,7 @@ async fn main() {
         .route("/theme.css", get(api_theme))
         .route("/api/build", get(api_build))
         .route("/api/parse", post(api_parse))
+        .route("/api/feedback", post(api_feedback))
         .route("/api/fix", get(api_fix))
         .route("/api/events", get(api_events))
         .route("/healthz", get(|| async { "ok" }))
@@ -301,6 +394,21 @@ mod tests {
         assert!(v.starts_with(concat!("v", env!("CARGO_PKG_VERSION"))), "{v}");
         let commit = v.split_once(" (").map(|(_, c)| c.trim_end_matches(')'));
         assert!(commit.is_none_or(|c| c.len() == 7 && c.chars().all(|ch| ch.is_ascii_hexdigit())), "{v}");
+    }
+
+    #[test]
+    fn feedback_lines_are_single_line_json_with_a_readable_time() {
+        assert_eq!(utc_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc_timestamp(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(utc_timestamp(1_795_126_503), "2026-11-19T22:15:03Z");
+        let line = feedback_line("keep -n\nplease", "tcpdump -ni x\u{0}\u{1b}[31m\n{\"time\":\"forged\"}", 0);
+        assert_eq!(line.lines().count(), 1, "{line}");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["time"], "1970-01-01T00:00:00Z");
+        assert_eq!(v["expected"], "keep -n\nplease");
+        assert_eq!(v["report"], "tcpdump -ni x[31m\n{\"time\":\"forged\"}");
+        let long = feedback_line(&"x".repeat(50_000), "", 0);
+        assert!(long.len() < FEEDBACK_MAX_FIELD + 200);
     }
 
     #[test]
