@@ -676,6 +676,7 @@ let lastParse = null; // what the last Parse was given and what it produced
 function setFeedback(info) {
   lastParse = info;
   $("#parse-feedback").hidden = !info || config.feedback.mode === "off";
+  $("#feedback-thanks").hidden = true;
 }
 
 function feedbackReport() {
@@ -727,11 +728,15 @@ async function sendFeedback() {
     try {
       const res = await fetch("api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected, report }) });
       const answer = await res.json().catch(() => ({}));
-      status(answer.message || (res.ok ? "Thank you. Your report was sent." : "The report could not be saved."));
       if (res.ok) {
-        $("#feedback-cancel").textContent = "Close";
+        // Sent: close the window and say so on the page, in place of the button.
+        $("#feedback-dialog").close();
+        $("#parse-feedback").hidden = true;
+        $("#feedback-thanks").textContent = answer.message || "Thank you. Your report was sent.";
+        $("#feedback-thanks").hidden = false;
         return;
       }
+      status(answer.message || "The report could not be saved.");
     } catch {
       status("The report could not be sent. Check your connection and try again.");
     }
@@ -904,7 +909,7 @@ async function main() {
   $("#parse-diff-close").addEventListener("click", () => { $("#parse-diff").hidden = true; });
   $("#parse-feedback").addEventListener("click", openFeedback);
   $("#feedback-send").addEventListener("click", () => sendFeedback().catch(console.error));
-  $("#feedback-cancel").addEventListener("click", () => { $("#feedback-dialog").close(); $("#feedback-cancel").textContent = "Cancel"; });
+  $("#feedback-cancel").addEventListener("click", () => $("#feedback-dialog").close());
   $("#fix").addEventListener("click", () => proposeFix().catch(console.error));
   $("#fix-apply").addEventListener("click", applyFix);
   $("#fix-cancel").addEventListener("click", () => $("#fix-dialog").close());
