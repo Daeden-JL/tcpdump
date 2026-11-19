@@ -107,6 +107,13 @@ Anything the builder has no setting for (an unknown option, a folder outside
 the configured one, a `<placeholder>`) is listed under the box and left out,
 and the box then shows the builder's own version of the command.
 
+After a Parse, a **What Parse changed** panel shows the text you entered and
+the builder's command one above the other, with the differences marked:
+struck through where something you wrote is not in the result as written,
+underlined where something is new, and dotted where a word only moved. The
+notes underneath say why anything was left out or replaced. Options written
+together (`-ni eth0`, `-nvs0`) are understood and kept.
+
 ## Invalid values
 
 A setting with a problem is outlined in the form with the message beside it,

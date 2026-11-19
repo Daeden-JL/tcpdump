@@ -352,8 +352,15 @@ label = "64 MiB"
 reason = "For 25/40/100 GbE links or when drops continue with a smaller buffer."
 
 [[flags]]
+name = "-n"
+label = "No host name lookups"
+description = "Show host addresses as numbers instead of looking up their names."
+explanation = "Skips DNS lookups for addresses, so output is faster and the capture itself does not generate DNS traffic. Only affects printed output, not files written with -w."
+value_type = "Bool"
+
+[[flags]]
 name = "-nn"
-label = "No name lookups"
+label = "No name or port lookups"
 description = "Show addresses and ports as numbers."
 explanation = "Skips DNS and service-name lookups. Output is faster, and the capture itself does not generate DNS traffic. Only affects printed output, not files written with -w."
 value_type = "Bool"
@@ -487,12 +494,12 @@ query = "v=1&t=powerscale&sc=nodes&n=17&im=named&if=lagg0&w=1&dd=1&lg=0&bg=1&f.s
 [[examples]]
 title = "LLDP or CDP: which switch port is this interface on?"
 description = "Prints the next LLDP or CDP announcement seen on one interface, in full, then stops. Switches send these every 30 to 60 seconds, so allow up to a minute."
-query = "v=1&t=powerscale&sc=node&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
+query = "v=1&t=powerscale&sc=node&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.n=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
 
 [[examples]]
 title = "LLDP or CDP on every node"
 description = "The same check on one interface of every node, to map each node to its switch port."
-query = "v=1&t=powerscale&sc=all&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.nn=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
+query = "v=1&t=powerscale&sc=all&im=named&if=<interface>&w=0&f.s=0&f.c=1&f.n=1&f.v=1&q=ether[12:2]=0x88cc or ether[20:2]=0x2000"
 
 [[examples]]
 title = "Linux: watch DNS live"

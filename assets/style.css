@@ -275,4 +275,16 @@ textarea#command { white-space: pre-wrap; }
 #cron_days { padding: 2px 4px; border-radius: 6px; }
 #summary { margin: 0 0 10px; padding-left: 18px; font-size: 0.9rem; overflow-wrap: anywhere; }
 #summary li { margin-bottom: 3px; }
+#parse-diff { margin: 0 0 10px; padding: 12px 14px 4px; border: 1px solid var(--line); border-radius: 8px; }
+#parse-diff h4 { margin: 8px 0 4px; font-size: 0.82rem; color: var(--muted); font-weight: 650; }
+#parse-diff pre { font-size: 0.8rem; }
+#parse-diff .result-head { margin-bottom: 4px; }
+#parse-why { margin-bottom: 0; }
+.diff-del { text-decoration: line-through; text-decoration-thickness: 2px; color: var(--error); }
+.diff-add { text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 3px; color: var(--accent); font-weight: 700; }
+.diff-move { text-decoration: underline dotted; text-underline-offset: 3px; }
+pre .diff-del { color: #ff9a9a; background: rgb(255 80 80 / 0.16); }
+pre .diff-add { color: #7ff0bf; background: rgb(80 255 170 / 0.14); }
+pre .diff-move { opacity: 0.8; }
+pre del, pre ins { border-radius: 3px; padding: 0 2px; }
 [hidden] { display: none !important; }

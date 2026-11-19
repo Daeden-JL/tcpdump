@@ -51,6 +51,18 @@
       placeholder="Fix the problems below to get a command, or paste one here and choose Parse."></textarea>
     <ul id="summary" aria-label="What this command does" hidden></ul>
     <p id="command-hint" class="note">You can edit or paste a command here, then choose Parse to update the settings to match.</p>
+    <section id="parse-diff" aria-labelledby="parse-diff-title" hidden>
+      <div class="result-head">
+        <h3 id="parse-diff-title">What Parse changed</h3>
+        <button type="button" id="parse-diff-close">Hide</button>
+      </div>
+      <p class="note">The builder rewrites a command in its own order and spelling. <span class="diff-del">Struck through</span> parts of what you entered are not in the result as written, <span class="diff-add">underlined</span> parts are new, and <span class="diff-move">dotted</span> parts only moved.</p>
+      <h4>Before (what you entered)</h4>
+      <pre id="diff-before" tabindex="0"></pre>
+      <h4>After (the builder's command)</h4>
+      <pre id="diff-after" tabindex="0"></pre>
+      <h4 id="parse-why" hidden>Why</h4>
+    </section>
     <ul id="parse-notes" hidden></ul>
     <ul id="issues"></ul>
     <button type="button" id="fix" hidden>Fix problems…</button>
