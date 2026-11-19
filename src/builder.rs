@@ -59,6 +59,10 @@ pub struct State {
     pub text_out: bool,
     /// Seconds after which the capture gives up by itself; empty for no limit.
     pub timeout: String,
+    /// Seconds to wait after creating the folder; empty for no pause.
+    pub pause: String,
+    /// Output file name, with {hostname} {iface} {timestamp}; empty for the standard name.
+    pub file_name: String,
     /// Recurring capture (start mode "cron"): kind is "daily", "weekdays",
     /// "hours" or "custom".
     pub cron_kind: String,
@@ -356,6 +360,22 @@ const MAX_TIMEOUT: u128 = 31 * 86400;
 /// The timeout in seconds, when one is set and usable.
 fn timeout_seconds(st: &State) -> Option<u128> {
     st.timeout.parse::<u128>().ok().filter(|n| (1..=MAX_TIMEOUT).contains(n))
+}
+
+const MAX_PAUSE: u64 = 3600;
+
+fn pause_seconds(st: &State) -> Option<u64> {
+    st.pause.parse::<u64>().ok().filter(|n| (1..=MAX_PAUSE).contains(n))
+}
+
+/// The parts of an output file name the builder fills in.
+pub const NAME_TOKENS: [&str; 3] = ["{hostname}", "{iface}", "{timestamp}"];
+
+/// A file name made of plain characters and the tokens above: no folders,
+/// nothing a shell would act on.
+pub fn valid_file_name(s: &str) -> bool {
+    let plain = NAME_TOKENS.iter().fold(s.to_string(), |text, token| text.replace(token, ""));
+    !s.is_empty() && !s.starts_with(['-', '.']) && plain.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
 }
 
 fn valid_iface(s: &str) -> bool {
@@ -697,6 +717,14 @@ pub fn fix(cfg: &Config, pairs: &[(String, String)]) -> Fixed {
         changes.push(format!("Interfaces to leave out ({}) reset to {}.", shown(&st.iface_exclude), target.all_interfaces_exclude));
         st.iface_exclude = target.all_interfaces_exclude.clone();
     }
+    if !st.pause.is_empty() && pause_seconds(&st).is_none() {
+        changes.push(format!("Pause {:?} removed.", st.pause));
+        st.pause.clear();
+    }
+    if !st.file_name.is_empty() && !valid_file_name(&st.file_name) {
+        changes.push(format!("File name {:?} removed; the standard name is used.", st.file_name));
+        st.file_name.clear();
+    }
     if !st.timeout.is_empty() && timeout_seconds(&st).is_none() {
         changes.push(format!("Time limit {:?} removed.", st.timeout));
         st.timeout.clear();
@@ -855,6 +883,8 @@ fn resolve(cfg: &Config, pairs: &[(String, String)], cx: &mut Ctx) -> State {
         },
         text_out: flag_on("to", false),
         timeout: get("tm").trim().to_string(),
+        pause: get("sl").trim().to_string(),
+        file_name: get("fn").trim().to_string(),
         cron_kind: match get("ck") {
             k @ ("weekdays" | "hours" | "custom") => k.to_string(),
             _ => "daily".to_string(),
@@ -1271,6 +1301,9 @@ fn summarize(cfg: &Config, st: &State, target: &Target, dir: &str, background: b
     if let Some(seconds) = timeout_seconds(st) {
         lines.push(format!("Gives up after {} if it has not finished by then.", human_duration(seconds)));
     }
+    if let Some(seconds) = pause_seconds(st).filter(|_| st.write || st.text_out) {
+        lines.push(format!("Waits {} after creating the folder before it starts.", human_duration(seconds.into())));
+    }
     match (background, st.write && st.log) {
         (true, true) => lines.push("Runs in the background, with tcpdump's own messages saved to a .log file beside the capture.".into()),
         (true, false) => lines.push("Runs in the background.".into()),
@@ -1406,6 +1439,21 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         dir = format!("{dir}/{}", target.date_subdir);
     }
     let background = saving && st.background;
+    // The file name: the standard one for the kind of output, or the one given.
+    let custom_name = saving && !st.file_name.is_empty();
+    if custom_name {
+        if !valid_file_name(&st.file_name) {
+            cx.error("file_name", "Use letters, digits and _ . - in the file name, plus {hostname}, {iface} and {timestamp} where those should go.");
+        } else {
+            if loop_list.is_some() && !st.file_name.contains("{iface}") {
+                cx.warn("file_name", "The file name has no {iface} in it, so every interface would write to the same file.");
+            }
+            if scope != "node" && !st.file_name.contains("{hostname}") {
+                cx.warn("file_name", "The file name has no {hostname} in it, so every node would write to the same file.");
+            }
+        }
+    }
+    let name_for = |standard: &'_ str| if custom_name { st.file_name.clone() } else { standard.to_string() };
     if st.write {
         let timestamp = if target.strftime_flags.iter().any(|f| enabled(f)) {
             &target.strftime_timestamp
@@ -1413,7 +1461,7 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
             &target.timestamp
         };
         let vars = [("hostname", target.hostname.as_str()), ("timestamp", timestamp.as_str()), ("iface", iface.as_str())];
-        cmd.push_str(&format!(" -w {dir}/{}", render(&target.file_name, &vars)));
+        cmd.push_str(&format!(" -w {dir}/{}", render(&name_for(&target.file_name), &vars)));
     } else if !text_out && (scope != "node" || loop_list.is_some()) {
         cx.warn("write", "Printing packets from several interfaces or nodes at once is hard to read; consider saving them to a file.");
     }
@@ -1432,8 +1480,8 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
         cmd.push_str(&render(redirect, &[("log", &log), ("dir", &dir)]));
     }
     if text_out {
-        let vars = [("hostname", target.hostname.as_str()), ("iface", iface.as_str())];
-        let file = format!("{dir}/{}", render(&target.text_name, &vars));
+        let vars = [("hostname", target.hostname.as_str()), ("timestamp", target.timestamp.as_str()), ("iface", iface.as_str())];
+        let file = format!("{dir}/{}", render(&name_for(&target.text_name), &vars));
         cmd.push(' ');
         cmd.push_str(&render(&target.text_redirect, &[("file", &file), ("dir", &dir)]));
     }
@@ -1464,7 +1512,17 @@ fn write_command(cfg: &Config, raw: State, mut cx: Ctx) -> Output {
     }
     cmd = wrap(&cmd, &mut cx);
     if saving {
-        cmd = format!("{}; {cmd}", render(&target.prepare, &[("dir", &dir)]));
+        // An optional pause gives a new folder time to appear (on every node, for a cluster).
+        let pause = match pause_seconds(&st) {
+            Some(seconds) => format!("{}; ", render(&target.pause, &[("seconds", &seconds.to_string())])),
+            None => {
+                if !st.pause.is_empty() {
+                    cx.error("pause", "Enter the pause as a whole number of seconds, from 1 to 3600, or leave it empty.");
+                }
+                String::new()
+            }
+        };
+        cmd = format!("{}; {pause}{cmd}", render(&target.prepare, &[("dir", &dir)]));
     }
 
     // Scheduling: wrap the capture, and optionally the stop command, in `at` jobs.
@@ -2019,6 +2077,37 @@ mod tests {
             let q = format!("v=1&if=lagg0&w=0&{bad}");
             assert!(!errors(&run(&q)).is_empty() && run(&q).command.is_empty(), "{bad}");
             assert!(errors(&fix(&cfg(), &parse_query(&q)).output).is_empty(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn pause_and_custom_file_name() {
+        // The second reported sweep: a pause after mkdir and a .lldp.txt name.
+        let o = run("v=1&im=all&ix=laggport|lo0|ISIINTERNAL|vlan|lagg&w=0&to=1&tm=120&sl=2&fn={hostname}_{iface}.lldp.txt&dd=1&bg=0&f.s=0&f.c=1&f.n=1&f.v=1&q=ether[12:2]=0x88cc");
+        assert!(errors(&o).is_empty() && warnings(&o).is_empty(), "{:?}", o.issues);
+        assert_eq!(
+            o.command,
+            "mkdir -p /ifs/data/Isilon_Support/$(date +%F); sleep 2; for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1`; do \
+             timeout 120 tcpdump -i ${iface} -s 0 -c 1 -n -v \"ether[12:2]=0x88cc\" \
+             > /ifs/data/Isilon_Support/$(date +%F)/$(uname -n)_${iface}.lldp.txt; done"
+        );
+        assert!(o.summary.contains(&"Waits 2 seconds after creating the folder before it starts.".to_string()));
+
+        // A custom name works for capture files too, with the right kind of timestamp for each rotation.
+        let o = run("v=1&if=lagg0&w=1&lg=0&bg=0&f.G=300&f.W=2&fn=case42.{timestamp}.{iface}.pcap");
+        assert!(o.command.contains(" -w /ifs/data/Isilon_Support/$(date +%F)/case42.%F_%H%M%S.lagg0.pcap"), "{}", o.command);
+        let o = run("v=1&if=lagg0&w=1&lg=0&bg=0&f.C=500&f.W=5&fn=case42.{timestamp}.{iface}.pcap");
+        assert!(o.command.contains("/case42.$(date +%F_%H%M%S).lagg0.pcap"), "{}", o.command);
+        // Names that would make captures overwrite each other are flagged, not refused.
+        let o = run("v=1&sc=all&if=bxe0,bxe1&w=1&bg=1&f.C=500&f.W=5&fn=capture.pcap");
+        assert!(errors(&o).is_empty() && warnings(&o).len() == 2, "{:?}", o.issues);
+        // Neither applies when nothing is saved.
+        assert_eq!(run("v=1&t=linux&if=eth0&w=0&sl=5&fn=x.txt").command, "sudo tcpdump -i eth0");
+        for bad in ["fn=../x.pcap", "fn=a/b.pcap", "fn=x;reboot.pcap", "fn=$(id).pcap", "fn=x y.pcap", "fn=-rf", "fn={other}.pcap", "sl=0", "sl=abc", "sl=2;reboot", "sl=99999"] {
+            let q = format!("v=1&if=lagg0&w=1&f.C=500&f.W=5&{bad}");
+            assert!(!errors(&run(&q)).is_empty() && run(&q).command.is_empty(), "{bad}");
+            let f = fix(&cfg(), &parse_query(&q));
+            assert!(errors(&f.output).is_empty() && f.changes.len() == 1, "{bad}: {:?}", f.changes);
         }
     }
 

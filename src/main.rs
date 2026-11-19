@@ -235,14 +235,6 @@ async fn api_parse(State(app): State<Arc<App>>, RawQuery(query): RawQuery, body:
             // Estimate inputs and fill-in values are not part of a command, so carry them over.
             parsed.pairs.extend(given.into_iter().filter(|(k, _)| ["en", "ei", "ls", "fs"].contains(&k.as_str()) || k.starts_with("ph.")));
             let output = builder::build(&cfg, &parsed.pairs);
-            // The file name is always generated; say so when that changed what was typed.
-            let braced = |s: &str| s.replace("${", "$").replace('}', "");
-            if let Some(path) = parsed.out_path.as_ref().filter(|p| !output.command.is_empty() && !braced(&output.command).contains(&braced(p))) {
-                let wrote_note = parsed.notes.iter().any(|n| n.contains("folder"));
-                if !wrote_note {
-                    parsed.notes.push(format!("The output file is always named by the builder, so {path} was replaced with its standard name."));
-                }
-            }
             json!({ "found": true, "notes": parsed.notes, "output": output })
         }
         None => json!({ "found": false }),

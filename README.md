@@ -45,7 +45,7 @@ front, do not configure it to cache HTML.
 
 The page shows the app version above the repository link: the version from
 `Cargo.toml`, plus the short git commit the binary was built from when git
-was available at build time (for example `v1.0.7 (fecb28f)`).
+was available at build time (for example `v1.0.8 (fecb28f)`).
 
 ## Configuration
 
@@ -162,7 +162,18 @@ for as long as it takes, which is forever on an interface where the packet
 never arrives. A time limit also gives a capture file a worst-case size in
 the estimate.
 
-Parse reads both back, including a `timeout` inside a cluster wrapper.
+Two more optional fields appear whenever something is saved:
+
+- **File name** overrides the standard name for that command. It takes plain
+  characters plus `{hostname}`, `{iface}` and `{timestamp}`, for example
+  `{hostname}_{iface}.lldp.txt`. A name without `{iface}` or `{hostname}` is
+  flagged when several interfaces or nodes would write to the same file.
+- **Pause after creating the folder** adds `sleep N` between `mkdir` and the
+  capture, to give a new folder time to appear (`pause` in the TOML).
+
+Parse reads all of these back, including a `timeout` inside a cluster
+wrapper. A pasted file name is kept when it can be written with those three
+placeholders; `${HOST}`, `$(hostname)` and the loop variable are recognised.
 
 ## Scheduling with `at`
 

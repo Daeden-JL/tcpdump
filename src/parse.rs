@@ -5,15 +5,12 @@
 //! The result is a query (the same form as a share link), so it goes through
 //! the builder's normal validation before any command is shown again.
 
-use crate::builder::{is_placeholder, split_atoms, valid_subdir, AT_UNITS};
+use crate::builder::{is_placeholder, split_atoms, valid_file_name, valid_subdir, AT_UNITS};
 use crate::config::{Cluster, Config, Flag, Target, ValueType};
 
 pub struct Parsed {
     pub pairs: Vec<(String, String)>,
     pub notes: Vec<String>,
-    /// The output file as it was written in the text, if there was one: the
-    /// `-w` path, or the file printed output was redirected to.
-    pub out_path: Option<String>,
 }
 
 /// tcpdump options that consume the following word, used to skip the value
@@ -427,6 +424,32 @@ fn split_schedule(text: &str, notes: &mut Vec<String>) -> (String, Vec<(String, 
     (kept.join("\n"), pairs)
 }
 
+/// Turn a file name as typed into the builder's form, with {hostname},
+/// {iface} and {timestamp} where the shell expressions for those were.
+/// `None` when something is left that the builder cannot write.
+fn name_template(file: &str, target: &Target, iface: Option<&str>) -> Option<String> {
+    let mut name = file.replace("%Y-%m-%d", "%F");
+    for stamp in [target.timestamp.as_str(), target.strftime_timestamp.as_str()] {
+        if !stamp.is_empty() {
+            name = name.replace(stamp, "{timestamp}");
+        }
+    }
+    // Ways of writing "this host", longest first so $HOSTNAME is not read as $HOST.
+    let hosts = [target.hostname.as_str(), "$(uname -n)", "$(hostname -s)", "$(hostname)", "`uname -n`", "`hostname -s`", "`hostname`", "${HOSTNAME}", "$HOSTNAME", "${HOST}", "$HOST"];
+    for host in hosts.into_iter().filter(|h| !h.is_empty()) {
+        name = name.replace(host, "{hostname}");
+    }
+    match iface {
+        Some(var) if var.starts_with('$') => {
+            let bare = var.trim_matches(['$', '{', '}']);
+            name = name.replace(&format!("${{{bare}}}"), "{iface}").replace(&format!("${bare}"), "{iface}");
+        }
+        Some(literal) if !literal.is_empty() => name = name.replace(literal, "{iface}"),
+        _ => {}
+    }
+    valid_file_name(&name).then_some(name)
+}
+
 fn simple_name(s: &str, extra: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
 }
@@ -528,6 +551,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
     let mut names: Vec<String> = Vec::new();
     let mut iface_exclude: Option<String> = None;
     let mut all = false;
+    let iface_typed = iface.clone();
     match iface {
         None => notes.push(format!("No -i option found; the interface was set to {}.", target.default_interface)),
         Some(v) if v.starts_with('$') => {
@@ -634,6 +658,16 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
     if text_path.is_some() {
         put("to", "1");
     }
+    // The file name is kept when it can be written with {hostname}, {iface} and {timestamp}.
+    if let Some(path) = out_path.as_ref().or(text_path.as_ref()) {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let standard = if out_path.is_some() { &target.file_name } else { &target.text_name };
+        match name_template(file, target, iface_typed.as_deref()) {
+            Some(name) if &name != standard => put("fn", &name),
+            Some(_) => {}
+            None => notes.push(format!("The file name {file} has something in it the builder cannot write, so its standard name is used.")),
+        }
+    }
     put("dd", if dated { "1" } else { "0" });
     put("lg", if out_path.is_some() && redirected { "1" } else { "0" });
     put("bg", if rest.contains('&') { "1" } else { "0" });
@@ -649,9 +683,14 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
             notes.push(format!("The time limit \"timeout {seconds}\" is not a plain number of seconds and was left out."));
         }
     }
-    // A pause before the capture is not something the builder writes.
+    // A pause before the capture: `mkdir ...; sleep 2; ...`.
     for part in text[..start].split(';').map(str::trim).filter(|p| p.starts_with("sleep ")) {
-        notes.push(format!("\"{part}\" before the capture is not something the builder writes and was left out."));
+        let seconds = part["sleep ".len()..].trim();
+        if (out_path.is_some() || text_path.is_some()) && !seconds.is_empty() && seconds.bytes().all(|c| c.is_ascii_digit()) {
+            put("sl", seconds);
+        } else {
+            notes.push(format!("\"{part}\" before the capture was left out: the builder only pauses a whole number of seconds after creating a folder."));
+        }
     }
 
     for (k, v) in &set_flags {
@@ -674,7 +713,7 @@ pub fn parse(cfg: &Config, text: &str, hint: &str) -> Option<Parsed> {
         }
     }
     pairs.extend(schedule);
-    Some(Parsed { pairs, notes, out_path: out_path.or(text_path) })
+    Some(Parsed { pairs, notes })
 }
 
 #[cfg(test)]
@@ -758,7 +797,10 @@ mod tests {
         assert_eq!(get(&p, "f.B"), Some("2147483647"));
         assert_eq!(get(&p, "net"), Some("172.26.0.0/16"));
         assert_eq!((get(&p, "dd"), get(&p, "bg"), get(&p, "lg")), (Some("0"), Some("0"), Some("0")));
-        assert_eq!(p.notes.len(), 1, "{:?}", p.notes);
+        // Two things cannot be reproduced, and each is said: the folder, and a
+        // file name with a date format the builder does not write.
+        assert_eq!(p.notes.len(), 2, "{:?}", p.notes);
+        assert!(p.notes[0].contains("folder") && p.notes[1].contains("file name"));
 
         let p = parse(
             &cfg(),
@@ -859,12 +901,13 @@ mod tests {
         assert_eq!((get(&p, "w"), get(&p, "to"), get(&p, "lg"), get(&p, "bg")), (Some("0"), Some("1"), Some("0"), Some("0")));
         assert_eq!((get(&p, "tm"), get(&p, "dd"), get(&p, "sd")), (Some("120"), Some("1"), None));
         assert_eq!((get(&p, "f.nn"), get(&p, "f.v"), get(&p, "f.s"), get(&p, "f.c")), (Some("1"), Some("1"), Some("0"), Some("1")));
-        // The only thing left out is the pause, and it is said.
-        assert_eq!(p.notes, ["\"sleep 2\" before the capture is not something the builder writes and was left out."]);
+        // Nothing is left out: the pause is a setting, and the file name is the standard one.
+        assert!(p.notes.is_empty(), "{:?}", p.notes);
+        assert_eq!((get(&p, "sl"), get(&p, "fn")), (Some("2"), None));
         let out = build(&cfg(), &p.pairs);
         assert_eq!(
             out.command,
-            "mkdir -p /ifs/data/Isilon_Support/$(date +%F); for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1`; do \
+            "mkdir -p /ifs/data/Isilon_Support/$(date +%F); sleep 2; for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1`; do \
              timeout 120 tcpdump -i ${iface} -s 0 -c 1 -nn -v \"(ether[12:2]=0x88cc or ether[20:2]=0x2000)\" \
              > /ifs/data/Isilon_Support/$(date +%F)/$(uname -n)_${iface}.txt; done"
         );
@@ -872,6 +915,53 @@ mod tests {
         let again = parse(&cfg(), &out.command, "powerscale").unwrap();
         assert!(again.notes.is_empty(), "{:?}", again.notes);
         assert_eq!(build(&cfg(), &again.pairs).command, out.command);
+    }
+
+    #[test]
+    fn second_reported_sweep_keeps_its_pause_and_file_name() {
+        // From the second parse feedback report: -ni, one filter term, a .lldp.txt
+        // name, and a stray quote after the loop.
+        let text = "mkdir /ifs/data/Isilon_Support/$(date +%Y-%m-%d); sleep 2; for INTERFACE in $(ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1); do timeout 120 tcpdump -ni $INTERFACE -v -s0 -c1 'ether[12:2]=0x88cc' > /ifs/data/Isilon_Support/$(date +%Y-%m-%d)/${HOST}_${INTERFACE}.lldp.txt; done'";
+        let p = parse(&cfg(), text, "powerscale").unwrap();
+        assert!(p.notes.is_empty(), "{:?}", p.notes);
+        assert_eq!((get(&p, "sl"), get(&p, "fn"), get(&p, "tm")), (Some("2"), Some("{hostname}_{iface}.lldp.txt"), Some("120")));
+        assert_eq!((get(&p, "f.n"), get(&p, "f.nn"), get(&p, "q")), (Some("1"), None, Some("ether[12:2]=0x88cc")));
+        let out = build(&cfg(), &p.pairs);
+        assert_eq!(
+            out.command,
+            "mkdir -p /ifs/data/Isilon_Support/$(date +%F); sleep 2; for iface in `ifconfig | grep -B3 ether | grep flags | egrep -v \"laggport|lo0|ISIINTERNAL|vlan|lagg\" | cut -d: -f1`; do \
+             timeout 120 tcpdump -i ${iface} -s 0 -c 1 -n -v \"ether[12:2]=0x88cc\" \
+             > /ifs/data/Isilon_Support/$(date +%F)/$(uname -n)_${iface}.lldp.txt; done"
+        );
+        let again = parse(&cfg(), &out.command, "powerscale").unwrap();
+        assert!(again.notes.is_empty(), "{:?}", again.notes);
+        assert_eq!(build(&cfg(), &again.pairs).command, out.command);
+    }
+
+    #[test]
+    fn file_names_are_kept_when_the_builder_can_write_them() {
+        let dir = "/ifs/data/Isilon_Support/$(date +%F)";
+        // A plain custom name, one with the interface written out, and one with a timestamp.
+        for (file, want) in [
+            ("mycap.pcap", Some("mycap.pcap")),
+            ("case42_lagg0.pcap", Some("case42_{iface}.pcap")),
+            ("`hostname`.$(date +%F_%H%M%S).lagg0.cap", Some("{hostname}.{timestamp}.{iface}.cap")),
+            ("$(uname -n).$(date +%F_%H%M%S).lagg0.pcap", None), // the standard name: nothing to record
+        ] {
+            let p = parse(&cfg(), &format!("tcpdump -i lagg0 -C 500 -W 5 -w {dir}/{file} &"), "powerscale").unwrap();
+            assert!(p.notes.is_empty(), "{file}: {:?}", p.notes);
+            assert_eq!(get(&p, "fn"), want, "{file}");
+        }
+        // Something the builder cannot write is dropped with a note, never passed through.
+        for file in ["$(id).pcap", "cap$RANDOM.pcap", "a b.pcap"] {
+            let p = parse(&cfg(), &format!("tcpdump -i lagg0 -C 500 -W 5 -w '{dir}/{file}' &"), "powerscale").unwrap();
+            assert_eq!(get(&p, "fn"), None, "{file}");
+            let out = build(&cfg(), &p.pairs);
+            assert!(!out.command.contains("$(id)") && !out.command.contains("RANDOM"), "{file}");
+        }
+        // A pause that is not a plain number, or with nothing saved, is noted instead.
+        let p = parse(&cfg(), "sleep 0.5; tcpdump -i lagg0 -c1", "powerscale").unwrap();
+        assert_eq!((get(&p, "sl"), p.notes.len()), (None, 1));
     }
 
     #[test]
